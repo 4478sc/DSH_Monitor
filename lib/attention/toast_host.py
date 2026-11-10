@@ -187,7 +187,15 @@ class Toast:
             ok = self.host.raise_owner()
         except Exception as exc:
             self.host._raise_log = getattr(self.host, "_raise_log", []) + ["exception %s" % exc]
-        emit({"event": "raise", "ok": bool(ok), "log": getattr(self.host, "_raise_log", [])})
+        log = getattr(self.host, "_raise_log", [])
+        emit({"event": "raise", "ok": bool(ok), "log": log})
+        # A click on a real desktop is the only place this can be observed, so it
+        # also lands in its own file where no log parsing can lose it.
+        try:
+            with open(os.path.join(os.path.expanduser("~"), ".dsh", "storages", "dsh-approval-toast", "raise.log"), "a") as fh:
+                fh.write(json.dumps({"ts": int(time.time() * 1000), "pid": os.getpid(), "owner": self.host.owner_pid, "ok": bool(ok), "log": log}) + "\n")
+        except Exception:
+            pass
         emit({"event": "clicked", "id": self.id})
         self.close("click")
 
@@ -333,6 +341,39 @@ class Host:
                         self._raise_log.append("  %s -> error %s" % (args[1], exc))
                         continue
                 return True
+        # Last resort: the ancestry can be wrong (a launcher, a wrapper), so also
+        # accept the widest window whose title names the application.
+        try:
+            out = subprocess.run(["xdotool", "search", "--name", "DeepSeek Harness"],
+                                 capture_output=True, text=True, timeout=1.5)
+            loose = [line.strip() for line in (out.stdout or "").splitlines() if line.strip()]
+        except Exception:
+            loose = []
+        best = None
+        best_width = 0
+        for wid in loose:
+            try:
+                geo = subprocess.run(["xdotool", "getwindowgeometry", "--shell", wid],
+                                     capture_output=True, text=True, timeout=1.5).stdout or ""
+            except Exception:
+                geo = ""
+            for line in geo.splitlines():
+                if line.startswith("WIDTH="):
+                    try:
+                        width = int(line.split("=", 1)[1])
+                    except Exception:
+                        width = 0
+                    if width > best_width:
+                        best, best_width = wid, width
+        if best is not None and best_width >= 200:
+            self._raise_log.append("fallback by title wid %s width=%d" % (best, best_width))
+            for args in (["xdotool", "windowactivate", "--sync", best],
+                         ["xdotool", "windowraise", best]):
+                try:
+                    subprocess.run(args, timeout=2.0)
+                except Exception:
+                    continue
+            return True
         try:
             out = subprocess.run(["wmctrl", "-lp"], capture_output=True, text=True, timeout=1.5)
             for line in (out.stdout or "").splitlines():
