@@ -76,7 +76,7 @@ test('ledger 模式：委托下游并记录结果，不改决策', async () => {
   assert.equal(records[0].decision, 'delegated');
   assert.equal(records[0].outcome, 'allowed-once');
   assert.equal(records[0].risk, 'high');
-  assert.equal(tools.length, 2, '注册了 query / stats 两个工具');
+  assert.equal(tools.length, 3, '注册了 query / stats / grants 三个工具');
 });
 
 test('gate 模式：高危直接拒绝，不调用下游', async () => {

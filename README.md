@@ -45,7 +45,8 @@ DSH 的审批是一个 waterfall 事件（`approval/request`），台账半边�
 | 工具 | 作用 |
 |---|---|
 | `approval_ledger_query` | 按工具/风险/决策/结果/时间查询记录 |
-| `approval_ledger_stats` | 总数、高危数、被拒数，以及按风险/决策/结果/工具的分布 |
+| `approval_ledger_stats` | 总数、高危数、被拒数、会话授权自动放行数，以及按风险/决策/结果/工具/来源的分布 |
+| `approval_ledger_grants` | 查看 / 撤销生效中的会话授权（`action: "revoke"`） |
 
 审计面板（宿主有 `webServer` 时自动挂载，没有就跳过）：
 
@@ -77,9 +78,9 @@ DSH 的审批是一个 waterfall 事件（`approval/request`），台账半边�
 
 ```powershell
 npm install          # zod + 测试用的 dsh-tools
-npm pack             # 产出 dsh-approval-toast-0.3.0.tgz
+npm pack             # 产出 dsh-approval-toast-0.5.0.tgz
 
-dsh plugin --profile desktop add .\dsh-approval-toast-0.3.0.tgz
+dsh plugin --profile desktop add .\dsh-approval-toast-0.5.0.tgz
 ```
 
 装完**重启 DSH**：宿主半边（`lib/index.js`、`lib/attention/`）不会热重载，纯客户端（`lib/client.js`）改完 Ctrl+R 即可。
@@ -95,9 +96,62 @@ dsh plugin --profile desktop add .\dsh-approval-toast-0.3.0.tgz
 | `denyPatterns` | `string[]` | `[]` | 追加高危正则；**同时**影响台账记录与浮窗预判 |
 | `ledgerDir` | `string` | `''` | 台账目录；空则 `$DSH_HOME/approval-ledger` |
 | `licenseKey` | `string` | `''` | 形如 `DWH-ENT-XXXX-XXXX` 视为企业授权，只影响面板导出标记 |
+| `sessionGrants.enabled` | `boolean` | `false` | 打开"会话内授权记忆"，见下节（设置页也能开关，见下） |
+| `sessionGrants.ttlMs` | `number` | `1800000` | 一次授权有效多久（1 分钟 ~ 24 小时） |
+| `sessionGrants.maxUses` | `number` | `20` | 一次授权最多自动放行多少次 |
+| `sessionGrants.dangerMaxUses` | `number` | `5` | `danger-full-access` 授权最多自动放行几次（**上限 5**，不可调大） |
+| `sessionGrants.alwaysAsk` | `string[]` | `[]` | 追加"永远要问我"的正则 |
 | `toast.spawn` | `boolean` | `true` | `false` = 只跑台账、不起浮窗进程（无桌面/无头环境） |
 
 浮窗外观（颜色、时长、同屏数量、语言）存在 `$DSH_HOME/storages/dsh-approval-toast/config.json`，由设置页写入；首次启动会从旧的 `storages/dsh-attention-toast/config.json` 复制一份，老用户设置不丢。
+
+## 会话内授权记忆（Session grants）
+
+默认关闭。打开后：**同一会话里你手动批准过一次 `(工具, sandbox 模式)`，之后同类请求直接放行**，不再弹审批。
+
+```yaml
+sessionGrants:
+  enabled: true
+  ttlMs: 1800000        # 30 分钟
+  maxUses: 20           # workspace-write 档的预算
+  dangerMaxUses: 5      # danger-full-access 档的预算（硬上限 5）
+  alwaysAsk: ['kubectl delete', 'git push --force']
+```
+
+### 设置页开关
+
+设置 → **Attention Toast** → **会话授权记忆** 里有这两个开关，改完立刻生效（不需要重启）：
+
+只有一个开关：**启用会话授权记忆**，写 `<ledgerDir>/settings.json` 的 `sessionGrants.enabled`。它**同时**覆盖 `workspace-write` 和 `danger-full-access` 两档 —— 要么都记、要么都不记。
+
+为什么没有单独的"danger-full-access 也记住"：那种"半开"状态在多数机器上没有意义。DSH 只在申请的档位**严格更宽**时才发起审批，而这台机器（以及大多数桌面安装）的常规策略本来就是 `workspace-write`，能往上申请的档位只有 `danger-full-access` —— 于是"只记 workspace-write"等于这个功能永远不会触发，用户却以为它开着。两档合一的代价由**次数上限**（danger 档 5 次）和**删除类拦截**兜住。
+
+设置页的两个值覆盖插件静态配置（`cordis` 里的 `sessionGrants`）；文件损坏或不存在时回退到静态配置，绝不会因为读不到文件而"意外打开"。写入是临时文件 + rename 原子替换。
+
+**删除文件的操作永远要审批**：命中删除特征（`rm / rmdir / unlink / del / erase / remove / truncate / git clean`、中文"删除/清空/移除/抹掉/格式化"，或工具名本身是 `fs_delete` 这类）时，即使 `danger-full-access` 授权还在、次数还没用完，也一律退回问你。识别是关键字判断（审批请求不带工具参数），误判的代价只是多问一次。
+
+粒度为什么是"工具 + 模式"而不是"这条命令"：DSH 的 `approval/request` 只带 `toolName / callId / reason / displayReason / signal`，**没有工具参数**，拿不到命令行和路径；能稳定解析的只有 `reason` 的固定前缀 `escalate sandbox to <mode>: <justification>`（来自 `@deepseek-ai/dsh-sandbox` 的 `approveEscalation`）。所以授权键是 `<sessionId>::<tool>::<mode>`，例如 `s-123::bash::workspace-write`。
+
+判定顺序（在台账半边的 `approval/request` 钩子里）：
+
+```
+gate 命中 denyPatterns            → rejected（最高优先）
+danger-full-access + 删除类操作    → 照旧问你（永不自动放行）
+命中 alwaysAsk                     → 照旧问你
+（justification 里）高危特征命中    → 照旧问你
+有生效授权                         → allowed-once（台账记 source: session-grant）
+其余                               → await next()
+```
+
+判定用的风险取自 justification（不含 `escalate sandbox to <mode>:` 前缀）：权限档本身由 `dangerMaxUses`（5 次上限）和删除类拦截管；如果把模式名算进风险，`danger-full-access` 会永远判 high，这个开关就成了死代码。
+
+授权存在台账本身：一行 `delegated + allowed-once` 就是"你批准过"，一行 `source: session-grant` 就是"用掉一次"。唯一额外状态是撤销，写在 `<ledgerDir>/grants.json`（台账 append-only，不能靠删行撤销）。失效条件：过期、次数用尽、会话结束、被撤销、或命中上面任一否决。撤销不是永久的：**同一个键再手动批准一次，撤销即被清除、授权重新生效**（比时间戳比较可靠——撤销和批准可能落在同一毫秒）。
+
+自动放行**不会**弹"等待审批"卡片（浮窗那一侧的 pending 会被撤掉），但会：
+
+- 在台账里留一行 `decision: auto-allow` / `source: session-grant`，审计面板"决策"列显示 `auto-allow · 授权`；
+- 计入 `approval_ledger_stats` 的"会话授权自动放行"条数与 `bySource` 分布；
+- 用工具 `approval_ledger_grants` 查看（`action: "list"`）或撤销（`action: "revoke", key: "…"`）；撤销后同类请求重新开始询问。
 
 ## 目录结构
 
@@ -105,6 +159,8 @@ dsh plugin --profile desktop add .\dsh-approval-toast-0.3.0.tgz
 lib/index.js                合成入口：先挂浮窗观察者，再挂台账决策者，注入统一风险分类器
 lib/ledger/index.js         台账半边：approval hook、风险分级、JSONL 读写、两个工具、面板路由
 lib/ledger/dashboard.js     HTML 面板、导出报告、授权状态
+lib/ledger/grants.js        会话授权：解析 sandbox 模式、算授权键、判有效性、删除类识别、撤销文件
+lib/ledger/settings.js      设置页开关的存储（<ledgerDir>/settings.json）与静态配置合并
 lib/attention/index.js      浮窗宿主半边：Typert 服务 attentionToast、弹窗进程、点击队列
 lib/attention/ledger-reader.js  台账 JSONL 的增量只读投影（坏行容错）
 lib/attention/host-events.js    原生宿主事件解析 + 去重点击队列
@@ -113,7 +169,7 @@ lib/attention/toast_host.ps1    Windows WPF 宿主（UTF-8 **带 BOM**）
 lib/attention/toast_host.py     Linux GTK3 宿主
 lib/client.js               浏览器半边：设置页、通知引擎、审批/提问预判、点击跳转
 lib/typert.host.js          Typert 清单（service: attentionToast）
-tests/                      53 个用例，7 个文件
+tests/                      81 个用例，9 个文件
 ```
 
 ## 测试
@@ -127,6 +183,8 @@ npm test        # node --test
 | `tests/ledger.test.mjs` | 风险分级、台账读写筛选、三种模式、查询统计工具、面板三个端点 |
 | `tests/merge.test.mjs` | **合并契约**：一次 mount 两半都在；`gate` 拒绝时浮窗仍拿到 pending；三种模式与下游调用；自定义 `denyPatterns` 双向生效；风险口径一致 |
 | `tests/manifest.test.mjs` | Typert 清单自洽（package 归属、id、strict codec） |
+| `tests/grants.test.mjs` | **会话授权**：mode 解析、授权键、TTL/次数、撤销、删除类操作识别、danger-full-access 与 alwaysAsk 否决 |
+| `tests/settings.test.mjs` | 设置页开关的存储：默认值、`dangerMaxUses` 上限 5、原子写、损坏文件回退、覆盖静态配置 |
 | `tests/ledger-reader.test.mjs` | 记录归一化、delegated 按 outcome 分类、坏行跳过 |
 | `tests/toast-registry.test.mjs` | 浮窗目标归一化、TTL 与上限淘汰 |
 | `tests/host-events.test.mjs` | 宿主事件解析、点击去重与 ack |
@@ -153,6 +211,8 @@ CI 在 **Ubuntu + Windows** 上跑同一套（Windows 额外校验 PowerShell �
 - 浮窗宿主是独立进程；Windows 侧样式全靠 WPF，改 `toast_host.ps1` 后必须确认 BOM 还在（否则中文解析失败、无任何卡片）。
 - 一个审批只该一张卡：`client.js` 的 `deliver()` 里 `if (event.kind === 'permission') return` 是去重关键，别删。
 - 面板的"企业授权"是上游作者的商业点（`DWH-ENT-*`），二次开发可以直接移除，不影响记录与导出。
+- 会话授权（`sessionGrants`）默认关闭；粒度是"工具 + sandbox 模式"，不是"这条命令"——DSH 的审批请求不带工具参数，想要命令级记忆需要在实现里用 `callId` 去会话日志回捞参数（未实现）。
+- 删除类操作的识别是**关键字**判断（工具名 + 模型的理由），因为审批请求不带参数；误判的代价只是多问你一次。
 
 ---
 
@@ -176,10 +236,23 @@ Install from source (tarball, never `link:`):
 ```powershell
 npm install
 npm pack
-dsh plugin --profile desktop add .\dsh-approval-toast-0.3.0.tgz
+dsh plugin --profile desktop add .\dsh-approval-toast-0.5.0.tgz
 ```
 
-Tests: `npm test` (53 cases, 7 files, Ubuntu + Windows CI).
+### Do not ask twice (session grants)
+
+`sessionGrants` is off by default. When enabled, approving one sandbox escalation (`bash` → `workspace-write`) answers later escalations of the **same tool and same sandbox mode in the same session** without a prompt, bounded by `ttlMs`, `maxUses`, an explicit revocation list (`<ledgerDir>/grants.json`) and hard vetoes:
+
+- high-risk operations always ask, whatever the grant says;
+- **anything that deletes files always asks**, even under a live `danger-full-access` grant;
+- `danger-full-access` is covered by the same single switch, but only for **five uses** (`dangerMaxUses`, hard cap 5) — there is no separate per-tier toggle;
+- `alwaysAsk` regexes, rejections and gate mode are never overridden.
+
+The single user-facing switch lives in **Settings → Attention Toast → Session grants** and is stored in `<ledgerDir>/settings.json`, which overrides the static plugin config when present (a corrupt file falls back to the config, never to "on"). It covers both permission tiers at once: half-on (remember workspace-write, always ask for full disk) would never fire on a host whose standing policy is already workspace-write.
+
+Grants live in the ledger itself (one `delegated + allowed-once` row is "the user said yes", one `source: session-grant` row is a use), so `approval_ledger_stats`, the dashboard and the audit export show exactly how often the plugin answered for you. `approval_ledger_grants` lists and revokes them; a revoke is not permanent — approving the same key again clears it and re-arms the grant (comparing timestamps would be ambiguous, since a revoke and an approval can share a millisecond). Granularity is per tool + mode because the approval waterfall carries no tool arguments — see the Chinese section above for why.
+
+Tests: `npm test` (70 cases, 8 files, Ubuntu + Windows CI).
 
 ## License
 
