@@ -182,10 +182,12 @@ class Toast:
         self.timer = GLib.timeout_add(max(1500, self.duration), lambda: (self.close("timeout"), False)[1])
 
     def clicked(self):
+        ok = False
         try:
-            self.host.raise_owner()
-        except Exception:
-            pass
+            ok = self.host.raise_owner()
+        except Exception as exc:
+            self.host._raise_log = getattr(self.host, "_raise_log", []) + ["exception %s" % exc]
+        emit({"event": "raise", "ok": bool(ok), "log": getattr(self.host, "_raise_log", [])})
         emit({"event": "clicked", "id": self.id})
         self.close("click")
 
