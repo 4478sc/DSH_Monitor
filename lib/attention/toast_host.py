@@ -300,17 +300,34 @@ class Host:
         if not pids:
             return False
         for pid in pids:
+            # No --onlyvisible: a minimized window has _NET_WM_STATE_HIDDEN and is
+            # not viewable, so filtering on visibility would skip exactly the window
+            # the user wants back.
             try:
-                out = subprocess.run(["xdotool", "search", "--onlyvisible", "--pid", str(pid)],
+                out = subprocess.run(["xdotool", "search", "--pid", str(pid)],
                                      capture_output=True, text=True, timeout=1.5)
                 ids = [line.strip() for line in (out.stdout or "").splitlines() if line.strip()]
             except Exception:
                 ids = []
-            if ids:
-                for args in (["xdotool", "windowactivate", "--sync", ids[-1]],
-                             ["xdotool", "windowraise", ids[-1]]):
+            for wid in reversed(ids):
+                try:
+                    geo = subprocess.run(["xdotool", "getwindowgeometry", "--shell", wid],
+                                         capture_output=True, text=True, timeout=1.5).stdout or ""
+                except Exception:
+                    geo = ""
+                width = 0
+                for line in geo.splitlines():
+                    if line.startswith("WIDTH="):
+                        try:
+                            width = int(line.split("=", 1)[1])
+                        except Exception:
+                            width = 0
+                if width < 200:
+                    continue
+                for args in (["xdotool", "windowactivate", "--sync", wid],
+                             ["xdotool", "windowraise", wid]):
                     try:
-                        subprocess.run(args, timeout=1.5)
+                        subprocess.run(args, timeout=2.0)
                     except Exception:
                         continue
                 return True
