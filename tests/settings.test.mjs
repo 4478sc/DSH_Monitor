@@ -20,7 +20,6 @@ function dir() {
 test('normalizeGrants fills defaults and caps dangerMaxUses at 5', () => {
   const base = normalizeGrants(undefined)
   assert.equal(base.enabled, false)
-  assert.equal(base.allowDangerFullAccess, false)
   assert.equal(base.dangerMaxUses, DEFAULT_GRANTS.dangerMaxUses)
   assert.equal(DANGER_MAX_USES_LIMIT, 5)
 
@@ -40,36 +39,40 @@ test('the settings file round-trips only explicit booleans', () => {
   assert.deepEqual(readSettings(d).sessionGrants, { enabled: true })
   assert.equal(fs.existsSync(settingsFile(d) + '.tmp'), false, 'atomic write leaves no temp file')
 
+  // The retired per-tier switch must not survive a read or a write.
   writeSettings(d, { sessionGrants: { allowDangerFullAccess: true } })
-  assert.deepEqual(readSettings(d).sessionGrants, { enabled: true, allowDangerFullAccess: true })
+  assert.deepEqual(readSettings(d).sessionGrants, { enabled: true })
 
   writeSettings(d, { sessionGrants: { enabled: false } })
-  assert.deepEqual(readSettings(d).sessionGrants, { enabled: false, allowDangerFullAccess: true })
+  assert.deepEqual(readSettings(d).sessionGrants, { enabled: false })
+})
+
+test('a legacy settings file that still names the removed switch is ignored', () => {
+  const d = dir()
+  fs.writeFileSync(settingsFile(d), JSON.stringify({ version: 1, sessionGrants: { enabled: true, allowDangerFullAccess: false } }), 'utf8')
+  assert.deepEqual(readSettings(d).sessionGrants, { enabled: true })
+  assert.equal(effectiveGrants({}, d).enabled, true)
 })
 
 test('a corrupt settings file changes nothing', () => {
   const d = dir()
   fs.writeFileSync(settingsFile(d), '{not json', 'utf8')
   assert.deepEqual(readSettings(d), { version: 1, sessionGrants: {} })
-  const effective = effectiveGrants({ enabled: true, allowDangerFullAccess: false }, d)
+  const effective = effectiveGrants({ enabled: true }, d)
   assert.equal(effective.enabled, true, 'falls back to the static config')
 })
 
 test('stored switches override the static config, per key', () => {
   const d = dir()
-  const config = { enabled: false, allowDangerFullAccess: false, maxUses: 7 }
+  const config = { enabled: false, maxUses: 7 }
   assert.equal(effectiveGrants(config, d).enabled, false)
 
   writeSettings(d, { sessionGrants: { enabled: true } })
   const enabled = effectiveGrants(config, d)
   assert.equal(enabled.enabled, true, 'UI turns it on without touching the config')
-  assert.equal(enabled.allowDangerFullAccess, false)
   assert.equal(enabled.maxUses, 7, 'untouched fields still come from the config')
 
-  writeSettings(d, { sessionGrants: { allowDangerFullAccess: true } })
-  assert.equal(effectiveGrants(config, d).allowDangerFullAccess, true)
-
   writeSettings(d, { sessionGrants: { enabled: false } })
-  assert.equal(effectiveGrants({ enabled: true, allowDangerFullAccess: true }, d).enabled, false,
+  assert.equal(effectiveGrants({ enabled: true }, d).enabled, false,
     'the UI can also switch it back off against a static true')
 })

@@ -94,7 +94,8 @@ test('settings section renders every block (root div stays open)', () => {
   const lookBlock = tree.kids[4]
   assert.equal(lookBlock.kids.length, 4, 'appearance block: title + duration + max + current session')
   const grantsBlock = tree.kids[6]
-  assert.equal(grantsBlock.kids.length, 3, 'grants block: title + hint + (loading hint or the two rows)')
+  assert.equal(grantsBlock.kids.length, 3, 'grants block: title + hint + (loading hint or the single switch + note)')
+  assert.equal(grantsBlock.kids[0].props.className, 'att-block-title')
 })
 
 test('builds only the pre-approval toast payload', () => {

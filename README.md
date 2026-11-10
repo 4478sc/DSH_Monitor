@@ -99,7 +99,6 @@ dsh plugin --profile desktop add .\dsh-approval-toast-0.5.0.tgz
 | `sessionGrants.enabled` | `boolean` | `false` | 打开"会话内授权记忆"，见下节（设置页也能开关，见下） |
 | `sessionGrants.ttlMs` | `number` | `1800000` | 一次授权有效多久（1 分钟 ~ 24 小时） |
 | `sessionGrants.maxUses` | `number` | `20` | 一次授权最多自动放行多少次 |
-| `sessionGrants.allowDangerFullAccess` | `boolean` | `false` | 是否连 `danger-full-access` 也记忆（默认永不；设置页也能开关） |
 | `sessionGrants.dangerMaxUses` | `number` | `5` | `danger-full-access` 授权最多自动放行几次（**上限 5**，不可调大） |
 | `sessionGrants.alwaysAsk` | `string[]` | `[]` | 追加"永远要问我"的正则 |
 | `toast.spawn` | `boolean` | `true` | `false` = 只跑台账、不起浮窗进程（无桌面/无头环境） |
@@ -114,8 +113,8 @@ dsh plugin --profile desktop add .\dsh-approval-toast-0.5.0.tgz
 sessionGrants:
   enabled: true
   ttlMs: 1800000        # 30 分钟
-  maxUses: 20
-  allowDangerFullAccess: false
+  maxUses: 20           # workspace-write 档的预算
+  dangerMaxUses: 5      # danger-full-access 档的预算（硬上限 5）
   alwaysAsk: ['kubectl delete', 'git push --force']
 ```
 
@@ -123,10 +122,9 @@ sessionGrants:
 
 设置 → **Attention Toast** → **会话授权记忆** 里有这两个开关，改完立刻生效（不需要重启）：
 
-| 开关 | 写入 | 效果 |
-|---|---|---|
-| 启用会话授权记忆 | `<ledgerDir>/settings.json` 的 `sessionGrants.enabled` | 关掉后每个审批都重新问你 |
-| danger-full-access 也记住 | `sessionGrants.allowDangerFullAccess` | 打开后全盘访问也能被授权记忆，但**最多自动放行 5 次**（`dangerMaxUses`，硬上限 5，配置也调不大） |
+只有一个开关：**启用会话授权记忆**，写 `<ledgerDir>/settings.json` 的 `sessionGrants.enabled`。它**同时**覆盖 `workspace-write` 和 `danger-full-access` 两档 —— 要么都记、要么都不记。
+
+为什么没有单独的"danger-full-access 也记住"：那种"半开"状态在多数机器上没有意义。DSH 只在申请的档位**严格更宽**时才发起审批，而这台机器（以及大多数桌面安装）的常规策略本来就是 `workspace-write`，能往上申请的档位只有 `danger-full-access` —— 于是"只记 workspace-write"等于这个功能永远不会触发，用户却以为它开着。两档合一的代价由**次数上限**（danger 档 5 次）和**删除类拦截**兜住。
 
 设置页的两个值覆盖插件静态配置（`cordis` 里的 `sessionGrants`）；文件损坏或不存在时回退到静态配置，绝不会因为读不到文件而"意外打开"。写入是临时文件 + rename 原子替换。
 
@@ -139,14 +137,13 @@ sessionGrants:
 ```
 gate 命中 denyPatterns            → rejected（最高优先）
 danger-full-access + 删除类操作    → 照旧问你（永不自动放行）
-danger-full-access 且开关关闭      → 照旧问你
 命中 alwaysAsk                     → 照旧问你
 （justification 里）高危特征命中    → 照旧问你
 有生效授权                         → allowed-once（台账记 source: session-grant）
 其余                               → await next()
 ```
 
-判定用的风险取自 justification（不含 `escalate sandbox to <mode>:` 前缀）：权限档本身由 `allowDangerFullAccess` + `dangerMaxUses` 管；如果把模式名算进风险，`danger-full-access` 会永远判 high，那两个开关就成了死代码。
+判定用的风险取自 justification（不含 `escalate sandbox to <mode>:` 前缀）：权限档本身由 `dangerMaxUses`（5 次上限）和删除类拦截管；如果把模式名算进风险，`danger-full-access` 会永远判 high，这个开关就成了死代码。
 
 授权存在台账本身：一行 `delegated + allowed-once` 就是"你批准过"，一行 `source: session-grant` 就是"用掉一次"。唯一额外状态是撤销，写在 `<ledgerDir>/grants.json`（台账 append-only，不能靠删行撤销）。失效条件：过期、次数用尽、会话结束、被撤销、或命中上面任一否决。撤销不是永久的：**同一个键再手动批准一次，撤销即被清除、授权重新生效**（比时间戳比较可靠——撤销和批准可能落在同一毫秒）。
 
@@ -172,7 +169,7 @@ lib/attention/toast_host.ps1    Windows WPF 宿主（UTF-8 **带 BOM**）
 lib/attention/toast_host.py     Linux GTK3 宿主
 lib/client.js               浏览器半边：设置页、通知引擎、审批/提问预判、点击跳转
 lib/typert.host.js          Typert 清单（service: attentionToast）
-tests/                      80 个用例，9 个文件
+tests/                      81 个用例，9 个文件
 ```
 
 ## 测试
@@ -248,10 +245,10 @@ dsh plugin --profile desktop add .\dsh-approval-toast-0.5.0.tgz
 
 - high-risk operations always ask, whatever the grant says;
 - **anything that deletes files always asks**, even under a live `danger-full-access` grant;
-- `danger-full-access` is never remembered unless `allowDangerFullAccess: true`, and then only for **five uses** (`dangerMaxUses`, hard cap 5);
+- `danger-full-access` is covered by the same single switch, but only for **five uses** (`dangerMaxUses`, hard cap 5) — there is no separate per-tier toggle;
 - `alwaysAsk` regexes, rejections and gate mode are never overridden.
 
-Both user-facing switches live in **Settings → Attention Toast → Session grants** and are stored in `<ledgerDir>/settings.json`, which overrides the static plugin config when present (a corrupt file falls back to the config, never to "on").
+The single user-facing switch lives in **Settings → Attention Toast → Session grants** and is stored in `<ledgerDir>/settings.json`, which overrides the static plugin config when present (a corrupt file falls back to the config, never to "on"). It covers both permission tiers at once: half-on (remember workspace-write, always ask for full disk) would never fire on a host whose standing policy is already workspace-write.
 
 Grants live in the ledger itself (one `delegated + allowed-once` row is "the user said yes", one `source: session-grant` row is a use), so `approval_ledger_stats`, the dashboard and the audit export show exactly how often the plugin answered for you. `approval_ledger_grants` lists and revokes them; a revoke is not permanent — approving the same key again clears it and re-arms the grant (comparing timestamps would be ambiguous, since a revoke and an approval can share a millisecond). Granularity is per tool + mode because the approval waterfall carries no tool arguments — see the Chinese section above for why.
 

@@ -149,7 +149,6 @@ const GRANT_CONFIG = {
   enabled: true,
   ttlMs: 10 * 60 * 1000,
   maxUses: 3,
-  allowDangerFullAccess: false,
 }
 
 test('a grant answers the second escalation without the answerer', async () => {
@@ -277,23 +276,22 @@ test('the grants tool lists and revokes live grants', async () => {
   await waterfall(mounted, escalation('c2'), () => { asked += 1; return 'allowed-once' })
   assert.equal(asked, 1, 'after a revoke the request is asked again')
 })
-test('the grants tool hides danger-full-access grants that cannot fire', async () => {
+test('one switch covers both tiers, and the list shows both', async () => {
   const ledgerDir = makeLedgerDir()
   const mounted = mount({ mode: 'ledger', ledgerDir, sessionGrants: GRANT_CONFIG })
   const grantsTool = mounted.tools.find((tool) => tool.name === 'approval_ledger_grants')
   await waterfall(mounted, escalation('d1', 'workspace-write'), () => 'allowed-once')
   await waterfall(mounted, escalation('d2', 'danger-full-access', 'need wide access'), () => 'allowed-once')
+
   const listed = await grantsTool.execute({ action: 'list' })
   assert.match(listed, /workspace-write/)
-  assert.doesNotMatch(listed, /danger-full-access/)
+  assert.match(listed, /danger-full-access/)
 
-  const permissive = mount({
-    mode: 'ledger',
-    ledgerDir,
-    sessionGrants: { ...GRANT_CONFIG, allowDangerFullAccess: true },
-  })
-  const permissiveList = await permissive.tools.find((tool) => tool.name === 'approval_ledger_grants').execute({ action: 'list' })
-  assert.match(permissiveList, /danger-full-access/)
+  // ... and the danger key really is usable now, up to its own cap.
+  let asked = 0
+  const answer = () => { asked += 1; return 'allowed-once' }
+  await waterfall(mounted, escalation('d3', 'danger-full-access', 'need wide access'), answer)
+  assert.equal(asked, 0, 'answered by the danger grant without a second switch')
 })
 
 test('the settings page switches override the static config', async () => {
@@ -320,7 +318,7 @@ test('a danger-full-access grant is capped at five uses', async () => {
   const mounted = mount({
     mode: 'ledger',
     ledgerDir: makeLedgerDir(),
-    sessionGrants: { enabled: true, allowDangerFullAccess: true, dangerMaxUses: 5, maxUses: 20 },
+    sessionGrants: { enabled: true, dangerMaxUses: 5, maxUses: 20 },
   })
   let asked = 0
   const answer = () => { asked += 1; return 'allowed-once' }
@@ -338,7 +336,7 @@ test('deleting files still asks under a danger-full-access grant', async () => {
   const mounted = mount({
     mode: 'ledger',
     ledgerDir: makeLedgerDir(),
-    sessionGrants: { enabled: true, allowDangerFullAccess: true, dangerMaxUses: 5 },
+    sessionGrants: { enabled: true, dangerMaxUses: 5 },
   })
   let asked = 0
   const answer = () => { asked += 1; return 'allowed-once' }

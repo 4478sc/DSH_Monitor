@@ -116,14 +116,15 @@ test('a revocation kills the grant until the key is approved again', () => {
 })
 
 test('grants are blocked by high risk, danger-full-access and alwaysAsk', () => {
-  const grants = { allowDangerFullAccess: false, alwaysAsk: ['kubectl delete'] }
+  const grants = { alwaysAsk: ['kubectl delete'] }
   const verdict = { sandboxMode: 'workspace-write' }
   assert.equal(grantBlockReason(grants, { toolName: 'bash', reason: 'x' }, verdict, { level: 'medium' }), '')
   assert.equal(grantBlockReason(grants, { toolName: 'bash', reason: 'x' }, verdict, { level: 'high' }), 'high-risk')
-  assert.equal(grantBlockReason(grants, { toolName: 'bash', reason: 'x' }, { sandboxMode: 'danger-full-access' }, { level: 'low' }), 'danger-full-access')
-  assert.equal(grantBlockReason({ allowDangerFullAccess: true, alwaysAsk: [] }, { toolName: 'bash', reason: 'x' }, { sandboxMode: 'danger-full-access' }, { level: 'low' }), '')
+  // No per-tier switch anymore: a danger escalation is eligible like any other,
+  // and the danger-level guards (destructive + cap) are separate.
+  assert.equal(grantBlockReason(grants, { toolName: 'bash', reason: 'read the registry' }, { sandboxMode: 'danger-full-access' }, { level: 'low' }), '')
   assert.equal(grantBlockReason(grants, { toolName: 'bash', reason: 'kubectl delete ns prod' }, verdict, { level: 'medium' }), 'always-ask')
-  assert.equal(grantBlockReason({ allowDangerFullAccess: false, alwaysAsk: ['('] }, { toolName: 'bash', reason: 'x' }, verdict, { level: 'medium' }), '')
+  assert.equal(grantBlockReason({ alwaysAsk: ['('] }, { toolName: 'bash', reason: 'x' }, verdict, { level: 'medium' }), '')
 })
 
 test('revocations persist atomically and survive a re-read', () => {
@@ -155,7 +156,7 @@ test('destructive detection is conservative and covers the usual spellings', () 
 })
 
 test('a destructive danger-full-access request is never answered by a grant', () => {
-  const permissive = { allowDangerFullAccess: true, alwaysAsk: [] }
+  const permissive = { alwaysAsk: [] }
   const verdict = { sandboxMode: 'danger-full-access' }
   assert.equal(grantBlockReason(permissive, { toolName: 'bash', reason: 'rm -rf ~/Downloads/x' }, verdict, { level: 'low' }), 'destructive')
   assert.equal(grantBlockReason(permissive, { toolName: 'bash', reason: 'write outside the workspace' }, verdict, { level: 'low' }), '')
