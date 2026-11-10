@@ -130,16 +130,44 @@ function Update-Layout {
   } catch { }
 }
 
+# The window is owned by the Electron main process, which is an ancestor of
+# this host, not the pid the plugin reports (that is the plugin-host child).
+# Collect the ancestry of both and match any of them against the windows.
+function Get-PidChain([int]$start) {
+  $chain = New-Object System.Collections.Generic.List[int]
+  $current = $start
+  for ($i = 0; $i -lt 8 -and $current -gt 0; $i++) {
+    $chain.Add($current)
+    $parent = 0
+    try {
+      $proc = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $current) -ErrorAction Stop
+      if ($null -eq $proc) { break }
+      $parent = [int]$proc.ParentProcessId
+    } catch { break }
+    if ($parent -le 0 -or $parent -eq $current) { break }
+    $current = $parent
+  }
+  return $chain
+}
+
+function Get-OwnerPids {
+  $set = @{}
+  foreach ($p in @((Get-PidChain $PID) + (Get-PidChain ([int]$script:OwnerPid)))) {
+    if ($p -gt 0) { $set[[uint32]$p] = $true }
+  }
+  return $set
+}
+
 function Raise-OwnerWindow {
-  if ($script:OwnerPid -le 0) { return $false }
+  $pids = Get-OwnerPids
+  if ($pids.Count -eq 0) { return $false }
   $script:OwnerHwnd = [IntPtr]::Zero
-  $ownerPid = [uint32]$script:OwnerPid
   try {
     $callback = [OwnerWindow+EnumWindowsProc]{
       param([IntPtr]$hwnd, [IntPtr]$lparam)
       $windowPid = [uint32]0
       [void][OwnerWindow]::GetWindowThreadProcessId($hwnd, [ref]$windowPid)
-      if ($windowPid -eq $ownerPid -and [OwnerWindow]::IsWindowVisible($hwnd) -and [OwnerWindow]::GetWindow($hwnd, 4) -eq [IntPtr]::Zero) {
+      if ($pids.ContainsKey($windowPid) -and [OwnerWindow]::IsWindowVisible($hwnd) -and [OwnerWindow]::GetWindow($hwnd, 4) -eq [IntPtr]::Zero) {
         if ([OwnerWindow]::GetWindowTextLength($hwnd) -gt 0) { $script:OwnerHwnd = $hwnd; return $false }
         if ($script:OwnerHwnd -eq [IntPtr]::Zero) { $script:OwnerHwnd = $hwnd }
       }
@@ -322,6 +350,7 @@ function Handle-Command([string]$line) {
     'show' { [void](Show-Toast $msg) }
     'close' { $t0 = Get-ToastById ([string]$msg.id); if ($t0) { Close-Toast $t0 'request' } }
     'owner' { try { $script:OwnerPid = [int]$msg.pid } catch { $script:OwnerPid = 0 } }    'debug-click' { Invoke-ToastClick ([string]$msg.id) }
+    'debug-ancestors' { $pids = Get-OwnerPids; Write-Event @{ event = 'ancestors'; pids = @($pids.Keys) } }
     'close-all' { foreach ($t0 in @($script:Toasts)) { Close-Toast $t0 'request' } }
     'config' {
       $c = $msg.config

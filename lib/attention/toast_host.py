@@ -245,26 +245,55 @@ class Host:
             t.win.move(x0 + w - width - MARGIN, y)
             y -= GAP
 
+    @staticmethod
+    def _pid_chain(start):
+        """This process and its ancestors, nearest first."""
+        chain = []
+        pid = int(start or 0)
+        for _ in range(8):
+            if pid <= 0 or pid in chain:
+                break
+            chain.append(pid)
+            try:
+                with open("/proc/%d/stat" % pid, "r") as fh:
+                    fields = fh.read().rsplit(")", 1)[-1].split()
+                pid = int(fields[1])
+            except Exception:
+                break
+        return chain
+
+    def _owner_pids(self):
+        """Pids whose windows belong to DSH.
+
+        The window is owned by the Electron main process, which is an ancestor
+        of this host, not the pid the plugin reports (that is the plugin-host
+        child), so both chains are searched.
+        """
+        pids = []
+        for pid in self._pid_chain(os.getpid()) + self._pid_chain(self.owner_pid):
+            if pid and pid not in pids:
+                pids.append(pid)
+        return pids
+
     def raise_owner(self):
         """Best-effort "bring DSH to the front" before the click is reported.
 
         A renderer's window.focus() cannot un-minimize a window, so the native
         host asks the window manager. xdotool/wmctrl are optional: if neither is
-        installed the click still navigates, the window just stays where it was.
+        installed, or the window is not an X11 one, the click still navigates and
+        the window just stays where it was.
         """
-        pid = self.owner_pid
-        if not pid:
+        pids = self._owner_pids()
+        if not pids:
             return False
-        for argv in (["xdotool", "search", "--onlyvisible", "--pid", str(pid)],
-                     ["wmctrl", "-lp"]):
+        for pid in pids:
             try:
-                out = subprocess.run(argv, capture_output=True, text=True, timeout=1.5)
-            except Exception:
-                continue
-            if argv[0] == "xdotool":
+                out = subprocess.run(["xdotool", "search", "--onlyvisible", "--pid", str(pid)],
+                                     capture_output=True, text=True, timeout=1.5)
                 ids = [line.strip() for line in (out.stdout or "").splitlines() if line.strip()]
-                if not ids:
-                    continue
+            except Exception:
+                ids = []
+            if ids:
                 for args in (["xdotool", "windowactivate", "--sync", ids[-1]],
                              ["xdotool", "windowraise", ids[-1]]):
                     try:
@@ -272,14 +301,18 @@ class Host:
                     except Exception:
                         continue
                 return True
+        try:
+            out = subprocess.run(["wmctrl", "-lp"], capture_output=True, text=True, timeout=1.5)
             for line in (out.stdout or "").splitlines():
                 parts = line.split(None, 4)
-                if len(parts) >= 3 and parts[2] == str(pid):
+                if len(parts) >= 3 and parts[2] in [str(p) for p in pids]:
                     try:
                         subprocess.run(["wmctrl", "-i", "-a", parts[0]], timeout=1.5)
                         return True
                     except Exception:
                         return False
+        except Exception:
+            pass
         return False
 
     def set_config(self, patch):
@@ -316,6 +349,8 @@ class Host:
         elif cmd == "config":
             self.set_config(msg.get("config") or {})
             emit({"event": "config", "ok": True})
+        elif cmd == "debug-ancestors":
+            emit({"event": "ancestors", "pids": self._owner_pids()})
         elif cmd == "owner":
             try:
                 self.owner_pid = int(msg.get("pid") or 0)
