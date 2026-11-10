@@ -80,7 +80,12 @@ DSH 的审批是一个 waterfall 事件（`approval/request`），台账半边�
 2. **打开对应会话**。目标会话来自浮窗身份注册表（`lib/attention/toast-registry.js`），从不解析标题/正文；会话已删除时弹"无法打开会话"，不会乱开别的会话。
 3. **定位待交互项**。审批弹窗点击后定位到 `[data-approval-key]` 那张卡片（DSH 审批面板唯一稳定的 DOM 钩子），并滚动到卡片内 `[data-approval-scroll]`；提问卡片没有 DOM 钩子，退化为滚到对话底部。若该会话**已经没有待处理项**（已经批过了），额外弹一张"提醒已过期"的浮窗，而不是让你对着空会话发呆。
 
-Linux 侧 `xdotool`/`wmctrl` 是可选的：没装时点击仍然能打开会话，只是窗口不会被拉到前台——这是窗口管理器的限制，不是插件静默失败。
+Linux 侧的置前只在 **X11 / XWayland** 窗口上有效，两道前提缺一不可：
+
+- 装了 `xdotool`（优先）或 `wmctrl`；
+- DSH 窗口对 X11 可见。**Wayland 原生运行时它不可见**——Electron 用 `--ozone-platform=wayland`（Ubuntu 22.04+ 常见）时，X11 侧只能看到 `mutter-x11-frames` 造的边框，`xdotool search --pid <dsh pid>` 返回 0 个窗口，`wmctrl` 同理。
+
+两个前提没满足时，**点击仍然会打开正确会话**，只是窗口不会被拉到前台（`raise_owner()` 返回 false，不报错）。确实需要 Linux 置前时，用 `--ozone-platform=x11` 启动 DSH 走 XWayland，再按上面的方式点浮窗即可。
 
 ## 安装
 
@@ -252,7 +257,7 @@ dsh plugin --profile desktop add .\dsh-approval-toast-0.5.0.tgz
 
 ### Clicking a toast raises DSH and lands on the interaction
 
-A click now does three things in order: the native host restores and raises the DSH window (Windows: `ShowWindowAsync(SW_RESTORE)` + `SetForegroundWindow`, falling back to `SwitchToThisWindow`; Linux: `xdotool windowactivate` / `wmctrl -i -a` when present), the browser half opens the session named by the toast registry — never by title — and approval toasts then focus the `[data-approval-key]` card (the only stable hook in the approval panel), scrolling the transcript as the fallback for question cards, which expose no DOM hook. If the session has nothing waiting any more, a "reminder is stale" toast says so instead of leaving you in an empty conversation. On Linux without xdotool/wmctrl the click still navigates; the window just is not raised, which is a window-manager limit rather than a silent failure.
+A click now does three things in order: the native host restores and raises the DSH window (Windows: `ShowWindowAsync(SW_RESTORE)` + `SetForegroundWindow`, falling back to `SwitchToThisWindow`; Linux: `xdotool windowactivate` / `wmctrl -i -a` when present), the browser half opens the session named by the toast registry — never by title — and approval toasts then focus the `[data-approval-key]` card (the only stable hook in the approval panel), scrolling the transcript as the fallback for question cards, which expose no DOM hook. If the session has nothing waiting any more, a "reminder is stale" toast says so instead of leaving you in an empty conversation. On Linux the raise only ever applies to **X11 / XWayland** windows, and two things must hold: `xdotool` (preferred) or `wmctrl` is installed, and the DSH window is visible to X11 at all. **A Wayland-native window is not**: when Electron runs with `--ozone-platform=wayland` (the default on Ubuntu 22.04+), X11 only sees the frame that `mutter-x11-frames` creates, `xdotool search --pid <dsh pid>` returns zero windows, and so does `wmctrl`. When either condition fails the click still opens the right session — only the raise is skipped (`raise_owner()` returns false, no error). If you want the raise on a Wayland desktop, start DSH with `--ozone-platform=x11` so it runs through XWayland.
 
 ### Do not ask twice (session grants)
 
