@@ -271,20 +271,14 @@ class Host:
         of this host, not the pid the plugin reports (that is the plugin-host
         child), so both chains are searched.
         """
+        # Unlike Windows there is no shell process in this chain that owns
+        # windows (the desktop session's ancestors are mutter/gnome-shell, which
+        # are not X11 clients), so every ancestor is kept. Filtering by the
+        # plugin host's executable would be wrong here: the plugin host may run
+        # under node while the window belongs to deepseek-harness.
         pids = []
         for pid in self._pid_chain(os.getpid()) + self._pid_chain(self.owner_pid):
-            if not pid or pid in pids:
-                continue
-            if pid == self.owner_pid or not self.owner_exe:
-                pids.append(pid)
-                continue
-            try:
-                exe = os.readlink("/proc/%d/exe" % pid)
-            except Exception:
-                exe = ""
-            # Keep only processes running the same binary as the plugin host, so
-            # a shell or file manager in the ancestry can never win the match.
-            if exe and exe == self.owner_exe:
+            if pid and pid not in pids:
                 pids.append(pid)
         return pids
 
