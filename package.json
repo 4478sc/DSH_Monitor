@@ -1,6 +1,6 @@
 {
   "name": "dsh-approval-toast",
-  "version": "0.6.0",
+  "version": "0.7.19",
   "private": false,
   "type": "module",
   "description": "Merged DSH plugin: an approval ledger (records every approval with risk/decision/outcome, gate and auto modes, audit dashboard) plus bottom-right desktop toasts for task and approval attention (Windows WPF / Linux GTK).",

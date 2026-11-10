@@ -22,6 +22,66 @@ public static class DpiAwareness {
   if (-not [DpiAwareness]::SetProcessDpiAwarenessContext([IntPtr](-4))) { [void][DpiAwareness]::SetProcessDPIAware() }
 } catch { }
 
+# Raise the DSH window that owns this host process (issue #1): a renderer's
+# window.focus() cannot restore a minimized window, so the native host does it
+# right before it reports the click.
+try {
+  Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class OwnerWindow {
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint command);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int command);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool altTab);
+  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+  [DllImport("kernel32.dll", CharSet = CharSet.Ansi)] static extern bool Process32First(IntPtr snap, ref PROCESSENTRY32 entry);
+  [DllImport("kernel32.dll", CharSet = CharSet.Ansi)] static extern bool Process32Next(IntPtr snap, ref PROCESSENTRY32 entry);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+  public struct PROCESSENTRY32 {
+    public uint dwSize; public uint cntUsage; public uint th32ProcessID; public IntPtr th32DefaultHeapID;
+    public uint th32ModuleID; public uint cntThreads; public uint th32ParentProcessID; public int pcPriClassBase;
+    public uint dwFlags; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExeFile;
+  }
+  public static uint ParentOf(uint pid) {
+    IntPtr snap = CreateToolhelp32Snapshot(0x00000002, 0);
+    if (snap == new IntPtr(-1)) { return 0; }
+    try {
+      PROCESSENTRY32 entry = new PROCESSENTRY32();
+      entry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
+      if (!Process32First(snap, ref entry)) { return 0; }
+      do { if (entry.th32ProcessID == pid) { return entry.th32ParentProcessID; } } while (Process32Next(snap, ref entry));
+      return 0;
+    } finally { CloseHandle(snap); }
+  }
+  public static string ExeNameOf(uint pid) {
+    IntPtr snap = CreateToolhelp32Snapshot(0x00000002, 0);
+    if (snap == new IntPtr(-1)) { return ""; }
+    try {
+      PROCESSENTRY32 entry = new PROCESSENTRY32();
+      entry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
+      if (!Process32First(snap, ref entry)) { return ""; }
+      do { if (entry.th32ProcessID == pid) { return entry.szExeFile ?? ""; } } while (Process32Next(snap, ref entry));
+      return "";
+    } finally { CloseHandle(snap); }
+  }
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int pid);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
+  [DllImport("user32.dll")] public static extern IntPtr GetThreadDesktop(uint threadId);
+  [DllImport("user32.dll")] public static extern bool GetUserObjectInformation(IntPtr hObj, int index, System.Text.StringBuilder info, int length, out int needed);
+}
+"@ -ErrorAction Stop
+} catch { }
 # Async stdin reader: blocking reads on the dispatcher froze the timers.
 try {
   Add-Type -TypeDefinition @"
@@ -79,6 +139,10 @@ $script:Kicker = @{
 }
 
 $script:Toasts = New-Object System.Collections.ArrayList
+$script:OwnerPid = 0
+$script:OwnerHwnd = [IntPtr]::Zero
+$script:OwnerExe = ''
+$script:OwnerExeName = ''
 $script:Seq = 0
 $script:Running = $true
 
@@ -107,6 +171,91 @@ function Update-Layout {
   } catch { }
 }
 
+# The window is owned by the Electron main process, which is an ancestor of
+# this host, not the pid the plugin reports (that is the plugin-host child).
+# Collect the ancestry of both and match any of them against the windows.
+function Get-PidChain([int]$start) {
+  $chain = New-Object System.Collections.Generic.List[int]
+  $current = $start
+  for ($i = 0; $i -lt 8 -and $current -gt 0; $i++) {
+    $chain.Add($current)
+    # Toolhelp, not WMI: a DSH child process cannot be assumed to have a
+    # working WMI connection, and WMI failing here made the chain collapse to
+    # this process alone, so no ancestor window was ever found.
+    $parent = [int][OwnerWindow]::ParentOf([uint32]$current)
+    if ($parent -le 0 -or $parent -eq $current) { break }
+    $current = $parent
+  }
+  return $chain
+}
+
+# The window belongs to the Electron main process, an ancestor of this host,
+# not to the pid the plugin reports (that is the plugin-host child). Walk both
+# ancestries and keep the pids that run the same executable as the plugin host,
+# so a shell or explorer window in the chain can never win the match.
+function Get-OwnerPids {
+  $set = @{}
+  $ownerPid = [uint32]$script:OwnerPid
+  $selfPid = [uint32]$PID
+  # The host owns the toast cards; matching its own window would raise the card
+  # instead of the application (skip own pid).
+  foreach ($p in @((Get-PidChain $PID) + (Get-PidChain ([int]$script:OwnerPid)))) {
+    if ([uint32]$p -eq $selfPid) { continue }
+    if ($p -le 0) { continue }
+    $candidate = [uint32]$p
+    if ($candidate -eq $ownerPid) { $set[$candidate] = $true; continue }
+    $wanted = if ($script:OwnerExeName -ne '') { $script:OwnerExeName } else { $script:OwnerExe }
+    if ($wanted -eq '') { $set[$candidate] = $true; continue }
+    $name = [string][OwnerWindow]::ExeNameOf($candidate)
+    if ($name -ne '' -and ($name -ieq $wanted -or ($script:OwnerExe -ne '' -and (Split-Path -Leaf $script:OwnerExe) -ieq $name))) { $set[$candidate] = $true }
+  }
+  return $set
+}
+function Raise-OwnerWindow {
+  $script:OwnerPidSet = Get-OwnerPids
+  $script:OwnerMatchCount = 0
+  $pids = $script:OwnerPidSet
+  if ($pids.Count -eq 0) { return $false }
+  $script:OwnerHwnd = [IntPtr]::Zero
+  try {
+    $callback = [OwnerWindow+EnumWindowsProc]{
+      param([IntPtr]$hwnd, [IntPtr]$lparam)
+      $windowPid = [uint32]0
+      [void][OwnerWindow]::GetWindowThreadProcessId($hwnd, [ref]$windowPid)
+      if ($script:OwnerPidSet.ContainsKey($windowPid)) { $script:OwnerMatchCount = [int]$script:OwnerMatchCount + 1 }
+      if ($script:OwnerPidSet.ContainsKey($windowPid) -and [OwnerWindow]::IsWindowVisible($hwnd) -and [OwnerWindow]::GetWindow($hwnd, 4) -eq [IntPtr]::Zero) {
+        if ([OwnerWindow]::GetWindowTextLength($hwnd) -gt 0) { $script:OwnerHwnd = $hwnd; return $false }
+        if ($script:OwnerHwnd -eq [IntPtr]::Zero) { $script:OwnerHwnd = $hwnd }
+      }
+      return $true
+    }
+    [void][OwnerWindow]::EnumWindows($callback, [IntPtr]::Zero)
+  } catch { return $false }
+  $hwnd = $script:OwnerHwnd
+  if ($hwnd -eq [IntPtr]::Zero) { return $false }
+  $script:RaiseDebug = ""
+  try {
+    $wasIconic = [OwnerWindow]::IsIconic($hwnd)
+    # Standard Windows recipe for "restore + really take the foreground":
+    # attach to the target UI thread and allow the foreground change, otherwise
+    # Windows silently converts the activation into a taskbar flash.
+    $procId = [uint32]0
+    $targetThread = [OwnerWindow]::GetWindowThreadProcessId($hwnd, [ref]$procId)
+    $currentThread = [OwnerWindow]::GetCurrentThreadId()
+    [void][OwnerWindow]::AllowSetForegroundWindow(-1)
+    [void][OwnerWindow]::AttachThreadInput($currentThread, $targetThread, $true)
+    $shown = [OwnerWindow]::ShowWindow($hwnd, 9)
+    if (-not $wasIconic) { [void][OwnerWindow]::ShowWindow($hwnd, 5) }
+    $fg = [OwnerWindow]::SetForegroundWindow($hwnd)
+    [void][OwnerWindow]::BringWindowToTop($hwnd)
+    [void][OwnerWindow]::AttachThreadInput($currentThread, $targetThread, $false)
+    if (-not $fg) { [OwnerWindow]::SwitchToThisWindow($hwnd, $true) }
+    Start-Sleep -Milliseconds 60
+    Start-Sleep -Milliseconds 120
+    $script:RaiseDebug = "wasIconic=$wasIconic show=$shown fg=$fg nowIconic=" + [OwnerWindow]::IsIconic($hwnd)
+    return $true
+  } catch { $script:RaiseDebug = "error=" + $_.Exception.Message; return $false }
+}
 function Get-ToastById([string]$id) {
   foreach ($t in @($script:Toasts)) { if ($t.Id -eq $id) { return $t } }
   return $null
@@ -125,6 +274,11 @@ function Close-Toast($toast, [string]$reason) {
 function Invoke-ToastClick([string]$id) {
   $t = Get-ToastById $id
   if ($null -eq $t -or $t.Closed) { return }
+  $raised = $false
+  try { $raised = [bool](Raise-OwnerWindow) } catch { $raised = $false }
+  $pidList = @()
+  if ($null -ne $script:OwnerPidSet) { $pidList = @($script:OwnerPidSet.Keys) }
+  Write-Event @{ event = 'raise'; ok = $raised; hwnd = [string]$script:OwnerHwnd; matches = [int]$script:OwnerMatchCount; pids = $pidList; error = $($Error[0].Exception.Message); debug = [string]$script:RaiseDebug }
   Write-Event @{ event = 'clicked'; id = $t.Id }
   Close-Toast $t 'click'
 }
@@ -270,7 +424,30 @@ function Handle-Command([string]$line) {
   switch ([string]$msg.cmd) {
     'show' { [void](Show-Toast $msg) }
     'close' { $t0 = Get-ToastById ([string]$msg.id); if ($t0) { Close-Toast $t0 'request' } }
-    'debug-click' { Invoke-ToastClick ([string]$msg.id) }
+    'owner' {
+      try { $script:OwnerPid = [int]$msg.pid } catch { $script:OwnerPid = 0 }
+      try { $script:OwnerExe = [string]$msg.exe } catch { $script:OwnerExe = '' }
+      try { $script:OwnerExeName = [string]$msg.exeName } catch { $script:OwnerExeName = '' }
+    }    'debug-click' { Invoke-ToastClick ([string]$msg.id) }
+    'debug-raise-timeline' {
+      $raised = $false
+      try { $raised = [bool](Raise-OwnerWindow) } catch { }
+      $samples = @()
+      for ($i = 0; $i -lt 10; $i++) {
+        Start-Sleep -Milliseconds 200
+        $samples += [string]([OwnerWindow]::IsIconic($script:OwnerHwnd))
+      }
+      Write-Event @{ event = 'raise-timeline'; ok = $raised; hwnd = [string]$script:OwnerHwnd; iconic = $samples; debug = [string]$script:RaiseDebug }
+    }
+    'debug-desktop' {
+      $sb = New-Object System.Text.StringBuilder 256
+      $need = 0
+      $desk = [OwnerWindow]::GetThreadDesktop([OwnerWindow]::GetCurrentThreadId())
+      [void][OwnerWindow]::GetUserObjectInformation($desk, 2, $sb, 256, [ref]$need)
+      $main = Get-Process -Id 38480 -ErrorAction SilentlyContinue
+      Write-Event @{ event = 'desktop'; desktop = $sb.ToString(); session = (Get-Process -Id $PID).SessionId; hwnd = [string]$script:OwnerHwnd; isIconic = ([OwnerWindow]::IsIconic($script:OwnerHwnd)); procMain = [string]$main.MainWindowHandle; procTitle = [string]$main.MainWindowTitle }
+    }
+    'debug-ancestors' { $pids = Get-OwnerPids; Write-Event @{ event = 'ancestors'; pids = @($pids.Keys) } }
     'close-all' { foreach ($t0 in @($script:Toasts)) { Close-Toast $t0 'request' } }
     'config' {
       $c = $msg.config

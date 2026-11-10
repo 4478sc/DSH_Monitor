@@ -4,7 +4,7 @@
 Reads one JSON command per line on stdin, writes JSON events on stdout.
 Commands: show / close / close-all / config / preview / ping / shutdown
 """
-import sys, os, json, glob, time
+import sys, os, json, glob, time, subprocess
 
 DISPLAY = os.environ.get("DISPLAY") or ":0"
 if not os.environ.get("XAUTHORITY"):
@@ -182,6 +182,20 @@ class Toast:
         self.timer = GLib.timeout_add(max(1500, self.duration), lambda: (self.close("timeout"), False)[1])
 
     def clicked(self):
+        ok = False
+        try:
+            ok = self.host.raise_owner()
+        except Exception as exc:
+            self.host._raise_log = getattr(self.host, "_raise_log", []) + ["exception %s" % exc]
+        log = getattr(self.host, "_raise_log", [])
+        emit({"event": "raise", "ok": bool(ok), "log": log})
+        # A click on a real desktop is the only place this can be observed, so it
+        # also lands in its own file where no log parsing can lose it.
+        try:
+            with open(os.path.join(os.path.expanduser("~"), ".dsh", "storages", "dsh-approval-toast", "raise.log"), "a") as fh:
+                fh.write(json.dumps({"ts": int(time.time() * 1000), "pid": os.getpid(), "owner": self.host.owner_pid, "ok": bool(ok), "log": log}) + "\n")
+        except Exception:
+            pass
         emit({"event": "clicked", "id": self.id})
         self.close("click")
 
@@ -200,6 +214,10 @@ class Host:
     def __init__(self):
         self.config = json.loads(json.dumps(DEFAULT_CONFIG))
         self.toasts = []
+        # pid of the DSH process whose window a click should raise (issue #1),
+        # plus the executable that owns the window (the Electron main process).
+        self.owner_pid = 0
+        self.owner_exe = ""
         self.screen = Gdk.Screen.get_default()
         self.monitor = Gdk.Display.get_default().get_primary_monitor()
         self.provider = Gtk.CssProvider()
@@ -239,6 +257,152 @@ class Host:
             t.win.move(x0 + w - width - MARGIN, y)
             y -= GAP
 
+    @staticmethod
+    def _pid_chain(start):
+        """This process and its ancestors, nearest first."""
+        chain = []
+        pid = int(start or 0)
+        for _ in range(8):
+            if pid <= 0 or pid in chain:
+                break
+            chain.append(pid)
+            try:
+                with open("/proc/%d/stat" % pid, "r") as fh:
+                    fields = fh.read().rsplit(")", 1)[-1].split()
+                pid = int(fields[1])
+            except Exception:
+                break
+        return chain
+
+    def _owner_pids(self):
+        """Pids whose windows belong to DSH.
+
+        The window is owned by the Electron main process, which is an ancestor
+        of this host, not the pid the plugin reports (that is the plugin-host
+        child), so both chains are searched.
+        """
+        # Unlike Windows there is no shell process in this chain that owns
+        # windows (the desktop session's ancestors are mutter/gnome-shell, which
+        # are not X11 clients), so every ancestor is kept. Filtering by the
+        # plugin host's executable would be wrong here: the plugin host may run
+        # under node while the window belongs to deepseek-harness.
+        pids = []
+        for pid in self._pid_chain(os.getpid()) + self._pid_chain(self.owner_pid):
+            if pid and pid not in pids:
+                pids.append(pid)
+        return pids
+
+    def raise_owner(self):
+        """Best-effort "bring DSH to the front" before the click is reported.
+
+        A renderer's window.focus() cannot un-minimize a window, so the native
+        host asks the window manager. xdotool/wmctrl are optional: if neither is
+        installed, or the window is not an X11 one, the click still navigates and
+        the window just stays where it was.
+        """
+        pids = self._owner_pids()
+        self._raise_log = ["pids=" + ",".join(str(p) for p in pids)]
+        if not pids:
+            return False
+        # The toast host owns the toast windows itself, and they are the widest
+        # windows it can see while a toast is on screen: probing pids in order made
+        # it "activate" its own card and report success while DSH stayed behind.
+        # Walk the chain from the oldest ancestor down and skip our own pid.
+        own = os.getpid()
+        for pid in reversed(pids):
+            if pid == own:
+                self._raise_log.append("skip own pid %d" % pid)
+                continue
+            # No --onlyvisible: a minimized window has _NET_WM_STATE_HIDDEN and is
+            # not viewable, so filtering on visibility would skip exactly the window
+            # the user wants back.
+            try:
+                out = subprocess.run(["xdotool", "search", "--pid", str(pid)],
+                                     capture_output=True, text=True, timeout=1.5)
+                ids = [line.strip() for line in (out.stdout or "").splitlines() if line.strip()]
+            except Exception:
+                ids = []
+            self._raise_log.append("pid %d ids=%s" % (pid, " ".join(ids)))
+            for wid in reversed(ids):
+                try:
+                    geo = subprocess.run(["xdotool", "getwindowgeometry", "--shell", wid],
+                                         capture_output=True, text=True, timeout=1.5).stdout or ""
+                except Exception:
+                    geo = ""
+                width = 0
+                for line in geo.splitlines():
+                    if line.startswith("WIDTH="):
+                        try:
+                            width = int(line.split("=", 1)[1])
+                        except Exception:
+                            width = 0
+                if width < 200:
+                    self._raise_log.append("wid %s width=%d skipped" % (wid, width))
+                    continue
+                self._raise_log.append("activate wid %s width=%d" % (wid, width))
+                for args in (["xdotool", "windowactivate", "--sync", wid],
+                             ["xdotool", "windowraise", wid]):
+                    try:
+                        done = subprocess.run(args, timeout=2.0)
+                        self._raise_log.append("  %s -> %s" % (args[1], done.returncode))
+                    except Exception as exc:
+                        self._raise_log.append("  %s -> error %s" % (args[1], exc))
+                        continue
+                try:
+                    now = subprocess.run(["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=1.5)
+                    current = (now.stdout or "").strip()
+                except Exception:
+                    current = ""
+                if current == wid:
+                    return True
+                self._raise_log.append("  not active after activate (active=%s)" % (current or "?"))
+        # Last resort: the ancestry can be wrong (a launcher, a wrapper), so also
+        # accept the widest window whose title names the application.
+        try:
+            out = subprocess.run(["xdotool", "search", "--name", "DeepSeek Harness"],
+                                 capture_output=True, text=True, timeout=1.5)
+            loose = [line.strip() for line in (out.stdout or "").splitlines() if line.strip()]
+        except Exception:
+            loose = []
+        best = None
+        best_width = 0
+        for wid in loose:
+            try:
+                geo = subprocess.run(["xdotool", "getwindowgeometry", "--shell", wid],
+                                     capture_output=True, text=True, timeout=1.5).stdout or ""
+            except Exception:
+                geo = ""
+            for line in geo.splitlines():
+                if line.startswith("WIDTH="):
+                    try:
+                        width = int(line.split("=", 1)[1])
+                    except Exception:
+                        width = 0
+                    if width > best_width:
+                        best, best_width = wid, width
+        if best is not None and best_width >= 200:
+            self._raise_log.append("fallback by title wid %s width=%d" % (best, best_width))
+            for args in (["xdotool", "windowactivate", "--sync", best],
+                         ["xdotool", "windowraise", best]):
+                try:
+                    subprocess.run(args, timeout=2.0)
+                except Exception:
+                    continue
+            return True
+        try:
+            out = subprocess.run(["wmctrl", "-lp"], capture_output=True, text=True, timeout=1.5)
+            for line in (out.stdout or "").splitlines():
+                parts = line.split(None, 4)
+                if len(parts) >= 3 and parts[2] in [str(p) for p in pids]:
+                    try:
+                        subprocess.run(["wmctrl", "-i", "-a", parts[0]], timeout=1.5)
+                        return True
+                    except Exception:
+                        return False
+        except Exception:
+            pass
+        return False
+
     def set_config(self, patch):
         for k, v in (patch or {}).items():
             if k == "colors" and isinstance(v, dict):
@@ -273,6 +437,22 @@ class Host:
         elif cmd == "config":
             self.set_config(msg.get("config") or {})
             emit({"event": "config", "ok": True})
+        elif cmd == "debug-raise":
+            ok = False
+            try:
+                ok = self.raise_owner()
+            except Exception as exc:
+                self._raise_log = getattr(self, "_raise_log", []) + ["exception %s" % exc]
+            emit({"event": "raise", "ok": bool(ok), "log": getattr(self, "_raise_log", [])})
+        elif cmd == "debug-ancestors":
+            emit({"event": "ancestors", "pids": self._owner_pids()})
+        elif cmd == "owner":
+            try:
+                self.owner_pid = int(msg.get("pid") or 0)
+            except Exception:
+                self.owner_pid = 0
+            self.owner_exe = str(msg.get("exe") or "")
+            emit({"event": "owner", "ok": True})
         elif cmd == "shot":
             path = msg.get("path") or "/tmp/toast.png"
             ok = False
