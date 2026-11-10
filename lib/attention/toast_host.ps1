@@ -40,6 +40,14 @@ public static class OwnerWindow {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool altTab);
   [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int pid);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
+  [DllImport("user32.dll")] public static extern IntPtr GetThreadDesktop(uint threadId);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern bool GetUserObjectInformation(IntPtr hObj, int index, System.Text.StringBuilder info, int length, out int needed);
 }
 "@ -ErrorAction Stop
 } catch { }
@@ -174,6 +182,7 @@ function Get-OwnerPids {
 }
 function Raise-OwnerWindow {
   $script:OwnerPidSet = Get-OwnerPids
+  $script:OwnerMatchCount = 0
   $pids = $script:OwnerPidSet
   if ($pids.Count -eq 0) { return $false }
   $script:OwnerHwnd = [IntPtr]::Zero
@@ -182,6 +191,7 @@ function Raise-OwnerWindow {
       param([IntPtr]$hwnd, [IntPtr]$lparam)
       $windowPid = [uint32]0
       [void][OwnerWindow]::GetWindowThreadProcessId($hwnd, [ref]$windowPid)
+      if ($script:OwnerPidSet.ContainsKey($windowPid)) { $script:OwnerMatchCount = [int]$script:OwnerMatchCount + 1 }
       if ($script:OwnerPidSet.ContainsKey($windowPid) -and [OwnerWindow]::IsWindowVisible($hwnd) -and [OwnerWindow]::GetWindow($hwnd, 4) -eq [IntPtr]::Zero) {
         if ([OwnerWindow]::GetWindowTextLength($hwnd) -gt 0) { $script:OwnerHwnd = $hwnd; return $false }
         if ($script:OwnerHwnd -eq [IntPtr]::Zero) { $script:OwnerHwnd = $hwnd }
@@ -192,13 +202,28 @@ function Raise-OwnerWindow {
   } catch { return $false }
   $hwnd = $script:OwnerHwnd
   if ($hwnd -eq [IntPtr]::Zero) { return $false }
+  $script:RaiseDebug = ""
   try {
-    if ([OwnerWindow]::IsIconic($hwnd)) { [void][OwnerWindow]::ShowWindowAsync($hwnd, 9) }
-    else { [void][OwnerWindow]::ShowWindowAsync($hwnd, 5) }
-    Start-Sleep -Milliseconds 40
-    if (-not [OwnerWindow]::SetForegroundWindow($hwnd)) { [OwnerWindow]::SwitchToThisWindow($hwnd, $true) }
+    $wasIconic = [OwnerWindow]::IsIconic($hwnd)
+    # Standard Windows recipe for "restore + really take the foreground":
+    # attach to the target UI thread and allow the foreground change, otherwise
+    # Windows silently converts the activation into a taskbar flash.
+    $procId = [uint32]0
+    $targetThread = [OwnerWindow]::GetWindowThreadProcessId($hwnd, [ref]$procId)
+    $currentThread = [OwnerWindow]::GetCurrentThreadId()
+    [void][OwnerWindow]::AllowSetForegroundWindow(-1)
+    [void][OwnerWindow]::AttachThreadInput($currentThread, $targetThread, $true)
+    $shown = [OwnerWindow]::ShowWindow($hwnd, 9)
+    if (-not $wasIconic) { [void][OwnerWindow]::ShowWindow($hwnd, 5) }
+    $fg = [OwnerWindow]::SetForegroundWindow($hwnd)
+    [void][OwnerWindow]::BringWindowToTop($hwnd)
+    [void][OwnerWindow]::AttachThreadInput($currentThread, $targetThread, $false)
+    if (-not $fg) { [OwnerWindow]::SwitchToThisWindow($hwnd, $true) }
+    Start-Sleep -Milliseconds 60
+    Start-Sleep -Milliseconds 120
+    $script:RaiseDebug = "wasIconic=$wasIconic show=$shown fg=$fg nowIconic=" + [OwnerWindow]::IsIconic($hwnd)
     return $true
-  } catch { return $false }
+  } catch { $script:RaiseDebug = "error=" + $_.Exception.Message; return $false }
 }
 function Get-ToastById([string]$id) {
   foreach ($t in @($script:Toasts)) { if ($t.Id -eq $id) { return $t } }
@@ -218,7 +243,11 @@ function Close-Toast($toast, [string]$reason) {
 function Invoke-ToastClick([string]$id) {
   $t = Get-ToastById $id
   if ($null -eq $t -or $t.Closed) { return }
-  [void](Raise-OwnerWindow)
+  $raised = $false
+  try { $raised = [bool](Raise-OwnerWindow) } catch { $raised = $false }
+  $pidList = @()
+  if ($null -ne $script:OwnerPidSet) { $pidList = @($script:OwnerPidSet.Keys) }
+  Write-Event @{ event = 'raise'; ok = $raised; hwnd = [string]$script:OwnerHwnd; matches = [int]$script:OwnerMatchCount; pids = $pidList; error = $($Error[0].Exception.Message); debug = [string]$script:RaiseDebug }
   Write-Event @{ event = 'clicked'; id = $t.Id }
   Close-Toast $t 'click'
 }
@@ -368,6 +397,24 @@ function Handle-Command([string]$line) {
       try { $script:OwnerPid = [int]$msg.pid } catch { $script:OwnerPid = 0 }
       try { $script:OwnerExe = [string]$msg.exe } catch { $script:OwnerExe = '' }
     }    'debug-click' { Invoke-ToastClick ([string]$msg.id) }
+    'debug-raise-timeline' {
+      $raised = $false
+      try { $raised = [bool](Raise-OwnerWindow) } catch { }
+      $samples = @()
+      for ($i = 0; $i -lt 10; $i++) {
+        Start-Sleep -Milliseconds 200
+        $samples += [string]([OwnerWindow]::IsIconic($script:OwnerHwnd))
+      }
+      Write-Event @{ event = 'raise-timeline'; ok = $raised; hwnd = [string]$script:OwnerHwnd; iconic = $samples; debug = [string]$script:RaiseDebug }
+    }
+    'debug-desktop' {
+      $sb = New-Object System.Text.StringBuilder 256
+      $need = 0
+      $desk = [OwnerWindow]::GetThreadDesktop([OwnerWindow]::GetCurrentThreadId())
+      [void][OwnerWindow]::GetUserObjectInformation($desk, 2, $sb, 256, [ref]$need)
+      $main = Get-Process -Id 38480 -ErrorAction SilentlyContinue
+      Write-Event @{ event = 'desktop'; desktop = $sb.ToString(); session = (Get-Process -Id $PID).SessionId; hwnd = [string]$script:OwnerHwnd; isIconic = ([OwnerWindow]::IsIconic($script:OwnerHwnd)); procMain = [string]$main.MainWindowHandle; procTitle = [string]$main.MainWindowTitle }
+    }
     'debug-ancestors' { $pids = Get-OwnerPids; Write-Event @{ event = 'ancestors'; pids = @($pids.Keys) } }
     'close-all' { foreach ($t0 in @($script:Toasts)) { Close-Toast $t0 'request' } }
     'config' {
