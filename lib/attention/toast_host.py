@@ -4,7 +4,7 @@
 Reads one JSON command per line on stdin, writes JSON events on stdout.
 Commands: show / close / close-all / config / preview / ping / shutdown
 """
-import sys, os, json, glob, time
+import sys, os, json, glob, time, subprocess
 
 DISPLAY = os.environ.get("DISPLAY") or ":0"
 if not os.environ.get("XAUTHORITY"):
@@ -182,6 +182,10 @@ class Toast:
         self.timer = GLib.timeout_add(max(1500, self.duration), lambda: (self.close("timeout"), False)[1])
 
     def clicked(self):
+        try:
+            self.host.raise_owner()
+        except Exception:
+            pass
         emit({"event": "clicked", "id": self.id})
         self.close("click")
 
@@ -200,6 +204,8 @@ class Host:
     def __init__(self):
         self.config = json.loads(json.dumps(DEFAULT_CONFIG))
         self.toasts = []
+        # pid of the DSH process whose window a click should raise (issue #1).
+        self.owner_pid = 0
         self.screen = Gdk.Screen.get_default()
         self.monitor = Gdk.Display.get_default().get_primary_monitor()
         self.provider = Gtk.CssProvider()
@@ -239,6 +245,43 @@ class Host:
             t.win.move(x0 + w - width - MARGIN, y)
             y -= GAP
 
+    def raise_owner(self):
+        """Best-effort "bring DSH to the front" before the click is reported.
+
+        A renderer's window.focus() cannot un-minimize a window, so the native
+        host asks the window manager. xdotool/wmctrl are optional: if neither is
+        installed the click still navigates, the window just stays where it was.
+        """
+        pid = self.owner_pid
+        if not pid:
+            return False
+        for argv in (["xdotool", "search", "--onlyvisible", "--pid", str(pid)],
+                     ["wmctrl", "-lp"]):
+            try:
+                out = subprocess.run(argv, capture_output=True, text=True, timeout=1.5)
+            except Exception:
+                continue
+            if argv[0] == "xdotool":
+                ids = [line.strip() for line in (out.stdout or "").splitlines() if line.strip()]
+                if not ids:
+                    continue
+                for args in (["xdotool", "windowactivate", "--sync", ids[-1]],
+                             ["xdotool", "windowraise", ids[-1]]):
+                    try:
+                        subprocess.run(args, timeout=1.5)
+                    except Exception:
+                        continue
+                return True
+            for line in (out.stdout or "").splitlines():
+                parts = line.split(None, 4)
+                if len(parts) >= 3 and parts[2] == str(pid):
+                    try:
+                        subprocess.run(["wmctrl", "-i", "-a", parts[0]], timeout=1.5)
+                        return True
+                    except Exception:
+                        return False
+        return False
+
     def set_config(self, patch):
         for k, v in (patch or {}).items():
             if k == "colors" and isinstance(v, dict):
@@ -273,6 +316,12 @@ class Host:
         elif cmd == "config":
             self.set_config(msg.get("config") or {})
             emit({"event": "config", "ok": True})
+        elif cmd == "owner":
+            try:
+                self.owner_pid = int(msg.get("pid") or 0)
+            except Exception:
+                self.owner_pid = 0
+            emit({"event": "owner", "ok": True})
         elif cmd == "shot":
             path = msg.get("path") or "/tmp/toast.png"
             ok = False

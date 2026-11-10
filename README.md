@@ -72,6 +72,16 @@ DSH 的审批是一个 waterfall 事件（`approval/request`），台账半边�
 
 浮窗宿主是常驻进程，走 JSON Lines：`show` / `close` / `close-all` / `config` / `preview` / `ping` / `shutdown` → `ready` / `shown` / `closed` / `clicked` / `error`。Windows 用 WPF（`lib/attention/toast_host.ps1`），Linux 用 GTK3（`lib/attention/toast_host.py`）。
 
+### 点击浮窗：唤起窗口 + 定位
+
+点桌面浮窗会依次做三件事：
+
+1. **唤起/置前 DSH 窗口**。渲染进程的 `window.focus()` 唤不回最小化的窗口，所以由原生宿主在点击当下代劳：Windows 宿主用 `ShowWindowAsync(SW_RESTORE)` + `SetForegroundWindow`（失败再 `SwitchToThisWindow`）还原并前置 DSH 主窗口；Linux 宿主依次尝试 `xdotool windowactivate` / `windowraise`、`wmctrl -i -a`。宿主通过 `owner` 命令拿到 DSH 进程 pid，不猜窗口标题。
+2. **打开对应会话**。目标会话来自浮窗身份注册表（`lib/attention/toast-registry.js`），从不解析标题/正文；会话已删除时弹"无法打开会话"，不会乱开别的会话。
+3. **定位待交互项**。审批弹窗点击后定位到 `[data-approval-key]` 那张卡片（DSH 审批面板唯一稳定的 DOM 钩子），并滚动到卡片内 `[data-approval-scroll]`；提问卡片没有 DOM 钩子，退化为滚到对话底部。若该会话**已经没有待处理项**（已经批过了），额外弹一张"提醒已过期"的浮窗，而不是让你对着空会话发呆。
+
+Linux 侧 `xdotool`/`wmctrl` 是可选的：没装时点击仍然能打开会话，只是窗口不会被拉到前台——这是窗口管理器的限制，不是插件静默失败。
+
 ## 安装
 
 本仓库不发布到 npm，从源码装（**用 tarball，不要用 `link:`**——`link:` 会在 profile 里做目录联接，删 profile 前必须摘掉，否则跟着清空源目录）：
@@ -169,7 +179,7 @@ lib/attention/toast_host.ps1    Windows WPF 宿主（UTF-8 **带 BOM**）
 lib/attention/toast_host.py     Linux GTK3 宿主
 lib/client.js               浏览器半边：设置页、通知引擎、审批/提问预判、点击跳转
 lib/typert.host.js          Typert 清单（service: attentionToast）
-tests/                      81 个用例，9 个文件
+tests/                      88 个用例，10 个文件
 ```
 
 ## 测试
@@ -183,6 +193,7 @@ npm test        # node --test
 | `tests/ledger.test.mjs` | 风险分级、台账读写筛选、三种模式、查询统计工具、面板三个端点 |
 | `tests/merge.test.mjs` | **合并契约**：一次 mount 两半都在；`gate` 拒绝时浮窗仍拿到 pending；三种模式与下游调用；自定义 `denyPatterns` 双向生效；风险口径一致 |
 | `tests/manifest.test.mjs` | Typert 清单自洽（package 归属、id、strict codec） |
+| `tests/click-to-navigate.test.mjs` | 点击链路端到端：去重队列 → 线上报文 → `resolveUiClick` / pending 匹配；含已删除会话、汇总、启动期积压 |
 | `tests/grants.test.mjs` | **会话授权**：mode 解析、授权键、TTL/次数、撤销、删除类操作识别、danger-full-access 与 alwaysAsk 否决 |
 | `tests/settings.test.mjs` | 设置页开关的存储：默认值、`dangerMaxUses` 上限 5、原子写、损坏文件回退、覆盖静态配置 |
 | `tests/ledger-reader.test.mjs` | 记录归一化、delegated 按 outcome 分类、坏行跳过 |
@@ -239,6 +250,10 @@ npm pack
 dsh plugin --profile desktop add .\dsh-approval-toast-0.5.0.tgz
 ```
 
+### Clicking a toast raises DSH and lands on the interaction
+
+A click now does three things in order: the native host restores and raises the DSH window (Windows: `ShowWindowAsync(SW_RESTORE)` + `SetForegroundWindow`, falling back to `SwitchToThisWindow`; Linux: `xdotool windowactivate` / `wmctrl -i -a` when present), the browser half opens the session named by the toast registry — never by title — and approval toasts then focus the `[data-approval-key]` card (the only stable hook in the approval panel), scrolling the transcript as the fallback for question cards, which expose no DOM hook. If the session has nothing waiting any more, a "reminder is stale" toast says so instead of leaving you in an empty conversation. On Linux without xdotool/wmctrl the click still navigates; the window just is not raised, which is a window-manager limit rather than a silent failure.
+
 ### Do not ask twice (session grants)
 
 `sessionGrants` is off by default. When enabled, approving one sandbox escalation (`bash` → `workspace-write`) answers later escalations of the **same tool and same sandbox mode in the same session** without a prompt, bounded by `ttlMs`, `maxUses`, an explicit revocation list (`<ledgerDir>/grants.json`) and hard vetoes:
@@ -252,7 +267,7 @@ The single user-facing switch lives in **Settings → Attention Toast → Sessio
 
 Grants live in the ledger itself (one `delegated + allowed-once` row is "the user said yes", one `source: session-grant` row is a use), so `approval_ledger_stats`, the dashboard and the audit export show exactly how often the plugin answered for you. `approval_ledger_grants` lists and revokes them; a revoke is not permanent — approving the same key again clears it and re-arms the grant (comparing timestamps would be ambiguous, since a revoke and an approval can share a millisecond). Granularity is per tool + mode because the approval waterfall carries no tool arguments — see the Chinese section above for why.
 
-Tests: `npm test` (70 cases, 8 files, Ubuntu + Windows CI).
+Tests: `npm test` (88 cases, 10 files, Ubuntu + Windows CI).
 
 ## License
 

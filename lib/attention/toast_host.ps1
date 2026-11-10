@@ -22,6 +22,27 @@ public static class DpiAwareness {
   if (-not [DpiAwareness]::SetProcessDpiAwarenessContext([IntPtr](-4))) { [void][DpiAwareness]::SetProcessDPIAware() }
 } catch { }
 
+# Raise the DSH window that owns this host process (issue #1): a renderer's
+# window.focus() cannot restore a minimized window, so the native host does it
+# right before it reports the click.
+try {
+  Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class OwnerWindow {
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint command);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int command);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool altTab);
+  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
+}
+"@ -ErrorAction Stop
+} catch { }
 # Async stdin reader: blocking reads on the dispatcher froze the timers.
 try {
   Add-Type -TypeDefinition @"
@@ -79,6 +100,8 @@ $script:Kicker = @{
 }
 
 $script:Toasts = New-Object System.Collections.ArrayList
+$script:OwnerPid = 0
+$script:OwnerHwnd = [IntPtr]::Zero
 $script:Seq = 0
 $script:Running = $true
 
@@ -107,6 +130,33 @@ function Update-Layout {
   } catch { }
 }
 
+function Raise-OwnerWindow {
+  if ($script:OwnerPid -le 0) { return $false }
+  $script:OwnerHwnd = [IntPtr]::Zero
+  $ownerPid = [uint32]$script:OwnerPid
+  try {
+    $callback = [OwnerWindow+EnumWindowsProc]{
+      param([IntPtr]$hwnd, [IntPtr]$lparam)
+      $windowPid = [uint32]0
+      [void][OwnerWindow]::GetWindowThreadProcessId($hwnd, [ref]$windowPid)
+      if ($windowPid -eq $ownerPid -and [OwnerWindow]::IsWindowVisible($hwnd) -and [OwnerWindow]::GetWindow($hwnd, 4) -eq [IntPtr]::Zero) {
+        if ([OwnerWindow]::GetWindowTextLength($hwnd) -gt 0) { $script:OwnerHwnd = $hwnd; return $false }
+        if ($script:OwnerHwnd -eq [IntPtr]::Zero) { $script:OwnerHwnd = $hwnd }
+      }
+      return $true
+    }
+    [void][OwnerWindow]::EnumWindows($callback, [IntPtr]::Zero)
+  } catch { return $false }
+  $hwnd = $script:OwnerHwnd
+  if ($hwnd -eq [IntPtr]::Zero) { return $false }
+  try {
+    if ([OwnerWindow]::IsIconic($hwnd)) { [void][OwnerWindow]::ShowWindowAsync($hwnd, 9) }
+    else { [void][OwnerWindow]::ShowWindowAsync($hwnd, 5) }
+    Start-Sleep -Milliseconds 40
+    if (-not [OwnerWindow]::SetForegroundWindow($hwnd)) { [OwnerWindow]::SwitchToThisWindow($hwnd, $true) }
+    return $true
+  } catch { return $false }
+}
 function Get-ToastById([string]$id) {
   foreach ($t in @($script:Toasts)) { if ($t.Id -eq $id) { return $t } }
   return $null
@@ -125,6 +175,7 @@ function Close-Toast($toast, [string]$reason) {
 function Invoke-ToastClick([string]$id) {
   $t = Get-ToastById $id
   if ($null -eq $t -or $t.Closed) { return }
+  [void](Raise-OwnerWindow)
   Write-Event @{ event = 'clicked'; id = $t.Id }
   Close-Toast $t 'click'
 }
@@ -270,7 +321,7 @@ function Handle-Command([string]$line) {
   switch ([string]$msg.cmd) {
     'show' { [void](Show-Toast $msg) }
     'close' { $t0 = Get-ToastById ([string]$msg.id); if ($t0) { Close-Toast $t0 'request' } }
-    'debug-click' { Invoke-ToastClick ([string]$msg.id) }
+    'owner' { try { $script:OwnerPid = [int]$msg.pid } catch { $script:OwnerPid = 0 } }    'debug-click' { Invoke-ToastClick ([string]$msg.id) }
     'close-all' { foreach ($t0 in @($script:Toasts)) { Close-Toast $t0 'request' } }
     'config' {
       $c = $msg.config
