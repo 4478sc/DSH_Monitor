@@ -11,18 +11,37 @@ permissions:
 
 jobs:
   test:
-    name: node ${{ matrix.node }}
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        node: [20, 22, 24]
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: 22
       - name: 安装依赖
         run: npm install --no-audit --no-fund
-      - name: 跑单测
+      - name: 语法检查 (JS)
+        shell: bash
+        run: node --check lib/index.js && node --check lib/client.js && node --check lib/typert.host.js && node --check lib/ledger/index.js && node --check lib/attention/index.js
+      - name: 语法检查 (Python toast host)
+        shell: bash
+        run: python -m py_compile lib/attention/toast_host.py
+      - name: 语法检查 (PowerShell toast host)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $err = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path lib/attention/toast_host.ps1), [ref]$null, [ref]$err)
+          if ($err) { $err | ForEach-Object { Write-Error $_.Message }; exit 1 }
+      - name: Windows toast host keeps its UTF-8 BOM
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bytes = [IO.File]::ReadAllBytes((Resolve-Path lib/attention/toast_host.ps1))
+          if ($bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) { Write-Error 'toast_host.ps1 must start with a UTF-8 BOM'; exit 1 }
+      - name: 跑全部单测
         run: npm test

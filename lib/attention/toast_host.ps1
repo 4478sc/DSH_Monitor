@@ -1,0 +1,343 @@
+﻿param([switch]$PreviewMode, [int]$HoldSeconds = 0)
+
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+try {
+  [Console]::InputEncoding = New-Object System.Text.UTF8Encoding $false
+  [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+} catch { }
+
+# Per-monitor DPI awareness so WPF layout units and Win32 pixels agree.
+try {
+  Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class DpiAwareness {
+  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+}
+"@ -ErrorAction Stop
+  if (-not [DpiAwareness]::SetProcessDpiAwarenessContext([IntPtr](-4))) { [void][DpiAwareness]::SetProcessDPIAware() }
+} catch { }
+
+# Async stdin reader: blocking reads on the dispatcher froze the timers.
+try {
+  Add-Type -TypeDefinition @"
+using System;
+using System.IO;
+using System.Text;
+using System.Collections.Concurrent;
+public static class StdinQueue {
+  public static readonly ConcurrentQueue<string> Lines = new ConcurrentQueue<string>();
+  public static volatile bool Closed;
+  private static Stream _s;
+  private static readonly byte[] _buf = new byte[65536];
+  private static readonly object _lock = new object();
+  private static string _rem = "";
+  public static void Start() {
+    try { _s = Console.OpenStandardInput(); } catch { Closed = true; return; }
+    try { _s.BeginRead(_buf, 0, _buf.Length, OnRead, null); } catch { Closed = true; }
+  }
+  private static void OnRead(IAsyncResult ar) {
+    int n;
+    try { n = _s.EndRead(ar); } catch { Closed = true; return; }
+    if (n <= 0) { Closed = true; return; }
+    lock (_lock) {
+      _rem += Encoding.UTF8.GetString(_buf, 0, n);
+      int i;
+      while ((i = _rem.IndexOf('\n')) >= 0) {
+        string line = _rem.Substring(0, i).Trim();
+        _rem = _rem.Substring(i + 1);
+        if (line.Length > 0) { Lines.Enqueue(line); }
+      }
+    }
+    try { _s.BeginRead(_buf, 0, _buf.Length, OnRead, null); } catch { Closed = true; }
+  }
+}
+"@ -ErrorAction Stop
+} catch { }
+
+$script:Config = @{
+  locale = 'zh'
+  width = 340
+  durationMs = 8000
+  maxVisible = 3
+  colors = @{
+    completed    = @{ bg = '#12351F'; fg = '#E6F4EA'; accent = '#2EA043' }
+    failed       = @{ bg = '#3A1518'; fg = '#FBE9EA'; accent = '#D1242F' }
+    question     = @{ bg = '#241A3D'; fg = '#EFE9FF'; accent = '#8250DF' }
+    permission   = @{ bg = '#3A2A10'; fg = '#FFF4E0'; accent = '#BF8700' }
+    sidelinedone = @{ bg = '#0D2A33'; fg = '#E3F6FB'; accent = '#1F8FB0' }
+  }
+}
+
+$script:Kicker = @{
+  zh = @{ completed = '任务完成'; failed = '任务出错'; question = '收到提问'; permission = '等待审批'; sidelinedone = '支线汇总' }
+  en = @{ completed = 'Task completed'; failed = 'Task failed'; question = 'Question'; permission = 'Approval needed'; sidelinedone = 'Side-line batch' }
+}
+
+$script:Toasts = New-Object System.Collections.ArrayList
+$script:Seq = 0
+$script:Running = $true
+
+function Write-Event($obj) {
+  try {
+    [Console]::Out.WriteLine(($obj | ConvertTo-Json -Compress -Depth 6))
+    [Console]::Out.Flush()
+  } catch { }
+}
+
+function Get-WorkArea { return [System.Windows.SystemParameters]::WorkArea }
+
+function Update-Layout {
+  try {
+    $wa = Get-WorkArea
+    $y = $wa.Bottom - 20
+    $items = @($script:Toasts | Sort-Object -Property Seq -Descending)
+    foreach ($t in $items) {
+      $h = if ($t.Win.ActualHeight -gt 10) { $t.Win.ActualHeight } else { 80 }
+      $w = if ($t.Win.ActualWidth -gt 10) { $t.Win.ActualWidth } else { [double]$script:Config.width }
+      $y = $y - $h
+      $t.Win.Left = [Math]::Max($wa.Left, $wa.Right - $w - 20)
+      $t.Win.Top = $y
+      $y = $y - 10
+    }
+  } catch { }
+}
+
+function Get-ToastById([string]$id) {
+  foreach ($t in @($script:Toasts)) { if ($t.Id -eq $id) { return $t } }
+  return $null
+}
+
+function Close-Toast($toast, [string]$reason) {
+  if ($null -eq $toast -or $toast.Closed) { return }
+  $toast.Closed = $true
+  try { if ($toast.Timer) { $toast.Timer.Stop(); $toast.Timer = $null } } catch { }
+  try { $toast.Win.Close() } catch { }
+  [void]$script:Toasts.Remove($toast)
+  Write-Event @{ event = 'closed'; id = $toast.Id; reason = $reason }
+  Update-Layout
+}
+
+function Invoke-ToastClick([string]$id) {
+  $t = Get-ToastById $id
+  if ($null -eq $t -or $t.Closed) { return }
+  Write-Event @{ event = 'clicked'; id = $t.Id }
+  Close-Toast $t 'click'
+}
+
+function Start-Timer($toast) {
+  if ($null -eq $toast -or $toast.Closed) { return }
+  try { if ($toast.Timer) { $toast.Timer.Stop() } } catch { }
+  $timer = New-Object System.Windows.Threading.DispatcherTimer
+  $timer.Interval = [TimeSpan]::FromMilliseconds([Math]::Max(1500, [int]$toast.Duration))
+  $timer.Add_Tick({
+    param($sender, $e)
+    try { $sender.Stop() } catch { }
+    foreach ($cand in @($script:Toasts)) {
+      if ($cand.Timer -eq $sender) { Close-Toast $cand 'timeout'; break }
+    }
+  })
+  $toast.Timer = $timer
+  $timer.Start()
+}
+
+function Show-Toast($payload) {
+  $script:Seq = $script:Seq + 1
+  $kind = [string]$payload.kind
+  if (-not $script:Config.colors.ContainsKey($kind)) { $kind = 'completed' }
+  $colors = $script:Config.colors[$kind]
+  $locale = [string]$script:Config.locale
+  if (-not $script:Kicker.ContainsKey($locale)) { $locale = 'zh' }
+
+  $id = if ($payload.id) { [string]$payload.id } else { 't' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
+  $duration = if ($payload.durationMs) { [int]$payload.durationMs } else { [int]$script:Config.durationMs }
+  $title = [string]$payload.title
+  $text = [string]$payload.text
+  $kicker = if ($payload.kicker) { [string]$payload.kicker } else { $script:Kicker[$locale][$kind] }
+  if ([string]::IsNullOrEmpty($title)) { $title = $kicker }
+
+  $win = New-Object System.Windows.Window
+  $win.WindowStyle = 'None'
+  $win.AllowsTransparency = $false
+  $win.Background = (New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($colors.bg)))
+  $win.ShowInTaskbar = $false
+  $win.Topmost = $true
+  $win.ShowActivated = $false
+  $win.ResizeMode = 'NoResize'
+  $win.SizeToContent = 'Manual'
+  $win.Width = [double]$script:Config.width
+
+  $card = New-Object System.Windows.Controls.Border
+  $card.CornerRadius = New-Object System.Windows.CornerRadius 12
+  $card.Background = (New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($colors.bg)))
+  $card.Padding = New-Object System.Windows.Thickness 14, 11, 12, 11
+
+  $grid = New-Object System.Windows.Controls.Grid
+  $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) | Out-Null
+  $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition)) | Out-Null
+  $grid.ColumnDefinitions[0].Width = New-Object System.Windows.GridLength 4
+  $grid.ColumnDefinitions[1].Width = New-Object System.Windows.GridLength 1, 'Star'
+
+  $bar = New-Object System.Windows.Controls.Border
+  $bar.Background = (New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($colors.accent)))
+  $bar.CornerRadius = New-Object System.Windows.CornerRadius 2
+  $bar.Margin = New-Object System.Windows.Thickness 0, 2, 10, 2
+  [System.Windows.Controls.Grid]::SetColumn($bar, 0)
+  $grid.Children.Add($bar) | Out-Null
+
+  $panel = New-Object System.Windows.Controls.StackPanel
+  [System.Windows.Controls.Grid]::SetColumn($panel, 1)
+  $grid.Children.Add($panel) | Out-Null
+
+  $head = New-Object System.Windows.Controls.Grid
+  $k = New-Object System.Windows.Controls.TextBlock
+  $k.Text = $kicker.ToUpper()
+  $k.FontSize = 10
+  $k.FontWeight = 'Bold'
+  $k.Foreground = (New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($colors.accent)))
+  $head.Children.Add($k) | Out-Null
+
+  $close = New-Object System.Windows.Controls.TextBlock
+  $close.Text = [char]0x2715
+  $close.FontSize = 15
+  $close.HorizontalAlignment = 'Right'
+  $close.Cursor = [System.Windows.Input.Cursors]::Hand
+  $close.Foreground = (New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($colors.fg)))
+  $close.Opacity = 0.9
+  $head.Children.Add($close) | Out-Null
+  $panel.Children.Add($head) | Out-Null
+
+  $t = New-Object System.Windows.Controls.TextBlock
+  $t.Text = $title
+  $t.FontSize = 13.5
+  $t.FontWeight = 'Bold'
+  $t.TextWrapping = 'Wrap'
+  $t.Margin = New-Object System.Windows.Thickness 0, 3, 0, 0
+  $t.Foreground = (New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($colors.fg)))
+  $panel.Children.Add($t) | Out-Null
+
+  if (-not [string]::IsNullOrEmpty($text)) {
+    $b = New-Object System.Windows.Controls.TextBlock
+    $b.Text = $text
+    $b.FontSize = 12
+    $b.TextWrapping = 'Wrap'
+    $b.MaxHeight = 62
+    $b.Margin = New-Object System.Windows.Thickness 0, 3, 0, 0
+    $b.Foreground = (New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($colors.fg)))
+    $b.Opacity = 0.92
+    $panel.Children.Add($b) | Out-Null
+  }
+
+  $card.Child = $grid
+  $win.Content = $card
+
+  # Height: fixed conservative tiers (WPF measurement under-reports on scaled
+  # displays); the body is clamped to three lines in the card itself.
+  # Three-line card: fixed 132 px. WPF measurement under-reports on scaled
+  # displays (125% here), and a taller card is better than clipped text.
+  $win.Height = if ([string]::IsNullOrEmpty($text)) { 96 } else { 132 }
+
+  $toast = [pscustomobject]@{
+    Id = $id; Win = $win; Timer = $null; Closed = $false; Seq = $script:Seq; Duration = $duration
+  }
+
+  $win.Tag = $id
+  $card.Tag = $id
+  $close.Tag = $id
+
+  $card.Add_MouseLeftButtonUp({ param($sender, $e) Invoke-ToastClick ([string]$sender.Tag); $e.Handled = $true })
+  $close.Add_MouseLeftButtonUp({ param($sender, $e) $t0 = Get-ToastById ([string]$sender.Tag); if ($t0) { Close-Toast $t0 'dismiss' }; $e.Handled = $true })
+  $card.Add_MouseEnter({ param($sender, $e) $t0 = Get-ToastById ([string]$sender.Tag); if ($t0 -and $t0.Timer) { try { $t0.Timer.Stop() } catch { } } })
+  $card.Add_MouseLeave({ param($sender, $e) $t0 = Get-ToastById ([string]$sender.Tag); if ($t0) { Start-Timer $t0 } })
+  $win.Add_Closed({ param($sender, $e) $t0 = Get-ToastById ([string]$sender.Tag); if ($t0) { [void]$script:Toasts.Remove($t0) }; Update-Layout })
+  $win.Add_SizeChanged({ param($sender, $e) Update-Layout })
+
+  [void]$script:Toasts.Add($toast)
+  $win.Show()
+  Update-Layout
+  Start-Timer $toast
+  Write-Event @{ event = 'shown'; id = $id; kind = $kind }
+  return $toast
+}
+
+function Handle-Command([string]$line) {
+  $msg = $null
+  try { $msg = $line | ConvertFrom-Json } catch { Write-Event @{ event = 'error'; message = 'bad json' }; return }
+  switch ([string]$msg.cmd) {
+    'show' { [void](Show-Toast $msg) }
+    'close' { $t0 = Get-ToastById ([string]$msg.id); if ($t0) { Close-Toast $t0 'request' } }
+    'debug-click' { Invoke-ToastClick ([string]$msg.id) }
+    'close-all' { foreach ($t0 in @($script:Toasts)) { Close-Toast $t0 'request' } }
+    'config' {
+      $c = $msg.config
+      if ($c) {
+        if ($c.locale) { $script:Config.locale = [string]$c.locale }
+        if ($c.width) { $script:Config.width = [int]$c.width }
+        if ($c.durationMs) { $script:Config.durationMs = [int]$c.durationMs }
+        if ($c.maxVisible) { $script:Config.maxVisible = [int]$c.maxVisible }
+        if ($c.colors) {
+          foreach ($kind in @($script:Config.colors.Keys)) {
+            $incoming = $c.colors.$kind
+            if ($incoming) {
+              if ($incoming.bg) { $script:Config.colors[$kind].bg = [string]$incoming.bg }
+              if ($incoming.fg) { $script:Config.colors[$kind].fg = [string]$incoming.fg }
+              if ($incoming.accent) { $script:Config.colors[$kind].accent = [string]$incoming.accent }
+            }
+          }
+        }
+        Update-Layout
+      }
+      Write-Event @{ event = 'config'; ok = $true }
+    }
+    'preview' {
+      $samples = @(
+        @{ kind = 'completed'; title = '重构上传接口'; text = '主线任务完成，已生成 3 个文件，并更新了 2 处类型声明与 1 个测试用例，构建通过。' },
+        @{ kind = 'permission'; title = '需要你确认'; text = 'bash: rm -rf build/  —  允许执行？' },
+        @{ kind = 'sidelinedone'; title = '支线任务全部结束'; text = '4 个后台会话已完成' }
+      )
+      $i = 0
+      foreach ($s in $samples) {
+        $s.id = 'preview-' + $i
+        $s.durationMs = 6000
+        [void](Show-Toast ([pscustomobject]$s))
+        $i = $i + 1
+      }
+    }
+    'ping' { Write-Event @{ event = 'pong'; at = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() } }
+    'shutdown' { $script:Running = $false }
+  }
+}
+
+$script:Pump = New-Object System.Windows.Threading.DispatcherTimer
+$script:Pump.Interval = [TimeSpan]::FromMilliseconds(50)
+$script:Pump.Add_Tick({
+  if (-not $script:Running) { $script:Pump.Stop(); [System.Windows.Threading.Dispatcher]::CurrentDispatcher.InvokeShutdown(); return }
+  try {
+    $line = ''
+    while ([StdinQueue]::Lines.TryDequeue([ref]$line)) {
+      if ($line.Trim().Length -gt 0) { Handle-Command $line.Trim() }
+    }
+    if ([StdinQueue]::Closed -and [StdinQueue]::Lines.IsEmpty -and $HoldSeconds -le 0) { $script:Running = $false }
+  } catch {
+    Write-Event @{ event = 'error'; message = [string]$_.Exception.Message }
+  }
+})
+
+[StdinQueue]::Start()
+$script:Pump.Start()
+Write-Event @{ event = 'ready'; pid = $PID; width = (Get-WorkArea).Width }
+
+if ($HoldSeconds -gt 0) {
+  $script:HoldTimer = New-Object System.Windows.Threading.DispatcherTimer
+  $script:HoldTimer.Interval = [TimeSpan]::FromSeconds($HoldSeconds)
+  $script:HoldTimer.Add_Tick({ $script:HoldTimer.Stop(); $script:Running = $false })
+  $script:HoldTimer.Start()
+}
+
+if ($PreviewMode) { Handle-Command '{"cmd":"preview"}' }
+
+[System.Windows.Threading.Dispatcher]::Run()

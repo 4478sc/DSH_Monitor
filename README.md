@@ -1,39 +1,34 @@
-# 审批台账 · dsh-approval-ledger
+# dsh-approval-toast
 
-[English](README.en.md) ・ **简体中文**
+**审批台账 + 桌面浮窗通知，一个 DSH 插件。**
 
 [![test](https://github.com/4478sc/DSH_Monitor/actions/workflows/test.yml/badge.svg)](https://github.com/4478sc/DSH_Monitor/actions/workflows/test.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-0f9b8e.svg)](LICENSE)
 
-> DSH 插件：记录 agent 每一次**需要审批**的操作——它想做什么、为什么、风险多高、最后批没批；可按规则拦住高危动作，并带一个能导出审计报告的 Web 面板。
+> Records every operation that needed approval (tool, reason, risk, decision, outcome), can reject high-risk ones, and — separately — pops bottom-right desktop toasts when a task finishes, fails, asks a question, or waits for approval. One install, one settings surface, one ledger.
 
-记录的东西长这样：
+![Windows toast](docs/images/toast-win.png)
 
-```
-✅ 2026-10-22 09:31:12  bash  风险 high  决策 delegated  结果 rejected
-    理由：安装依赖需要执行 curl | sh
-```
+这个仓库由两个独立插件合并而来，用于二次开发：
 
-## 复刻声明
+| 原插件 | 仓库 | 合并后去哪了 |
+|---|---|---|
+| 审批台账 @deepwhale-cn/dsh-approval-ledger | [feely0208/dsh-approval-ledger](https://github.com/feely0208/dsh-approval-ledger) | `lib/ledger/`（记录、风险分级、两个查询工具、审计面板） |
+| 桌面浮窗 dsh-attention-toast | [4478sc/DSH_AttentionPlugins_Desktop](https://github.com/4478sc/DSH_AttentionPlugins_Desktop) | `lib/attention/` + `lib/client.js` + `lib/typert.host.js` |
 
-本仓库是 [feely0208/dsh-approval-ledger](https://github.com/feely0208/dsh-approval-ledger) 的**复刻副本**，用于个人二次开发：
+合并前它们已经是**只读联动**关系（浮窗插件读台账插件写的 JSONL）；合并后这条通路变成进程内共享，不再需要装两个包。
 
-| 项目 | 值 |
-|---|---|
-| 上游仓库 | `feely0208/dsh-approval-ledger` |
-| 上游版本 | `0.2.8`（tag `v0.2.8`，commit `49beec0`） |
-| 复刻范围 | `lib/`、`tests/`、`icon.svg`、`cordis.patch.yml` 与上游**逐字节一致**；文档、包元数据、仓库配套按本仓库调整 |
-| 授权 | MIT，原版权归温州深鲸智能科技有限公司；见 [LICENSE](LICENSE) |
+## 为什么要合成一个
 
-上游网络可达时，也可直接装上游包：
+1. **一个审批事件只该被观察一次。** 两个插件都挂 `approval/request`，顺序不可控：如果台账先挂上并在 `gate` 模式直接 `rejected`，浮窗那一侧就永远看不到这次审批，"等待审批"卡片会丢。合并后由 `lib/index.js` 固定顺序：**先挂浮窗观察者，再挂台账决策者**。
+2. **风险口径统一。** 浮窗卡上写的"预判风险 high（仅供参考）"和台账里存的 `risk` 现在是同一个分类器（`lib/ledger` 的 `classifyRisk`），不会再出现一边 high 一边 medium。`denyPatterns` 自定义规则同时作用于两者。
+3. **少装一个包、少一份配置、少一处版本错位。**
 
-```sh
-dsh plugin --profile web add @deepwhale-cn/dsh-approval-ledger
-```
+## 功能
 
-## 它是怎么工作的
+### 审批台账
 
-DSH 的审批是一个 waterfall 事件（`approval/request`），本插件在这个 waterfall 上挂一个监听器，按 `mode` 决定要不要干预：
+DSH 的审批是一个 waterfall 事件（`approval/request`），台账半边挂一个监听器：
 
 | 模式 | 行为 |
 |---|---|
@@ -43,114 +38,149 @@ DSH 的审批是一个 waterfall 事件（`approval/request`），本插件在�
 
 审批结果只有四种：`allowed-once` / `rejected` / `cancelled` / `unavailable`。
 
-## 安装（从本仓库）
+台账写在 `$DSH_HOME/approval-ledger/ledger.jsonl`（没有 `DSH_HOME` 时用 `~/.dsh/approval-ledger/ledger.jsonl`），一行一条 JSON。写失败不影响审批本身；读的时候坏行跳过。
 
-本仓库**没有发布到 npm**（包名沿用了上游作用域，直接 `npm publish` 会被拒）。本地安装用 tarball，不要用 `link:`——`link:` 会在 profile 里做成目录联接，删 profile 时会把源码目录一起清空：
-
-```powershell
-npm install          # 只装 devDependency @deepseek-ai/dsh-tools，用于跑测试
-npm pack             # 产出 deepwhale-cn-dsh-approval-ledger-0.2.8.tgz
-
-dsh plugin --profile desktop add .\deepwhale-cn-dsh-approval-ledger-0.2.8.tgz
-```
-
-装完**重启 DSH**（host 半边 `lib/index.js` 不热加载）。默认 `ledger` 模式，装上就开始记录，**不改变任何审批行为**。
-
-要启用拦截，在 profile 的插件配置里加 `mode: gate` 并重启。
-
-## 配置
-
-配置字段定义在 `lib/index.js` 的 `DEFAULT_CONFIG`：
-
-| 字段 | 类型 | 默认 | 说明 |
-|---|---|---|---|
-| `mode` | `ledger` \| `gate` \| `auto` | `ledger` | 见上表 |
-| `allowlist` | `string[]` | `[]` | `auto` 模式下直接放行的工具名 |
-| `denyPatterns` | `string[]` | `[]` | 追加到高危清单的正则（字符串，命中即 `high`） |
-| `ledgerDir` | `string` | `''` | 台账目录；空则用 `$DSH_HOME/approval-ledger` |
-| `licenseKey` | `string` | `''` | 形如 `DWH-ENT-XXXX-XXXX` 视为企业授权，仅影响面板导出的标记 |
-
-## 台账位置
-
-`$DSH_HOME/approval-ledger/ledger.jsonl`（没有 `DSH_HOME` 时用 `~/.dsh/approval-ledger/ledger.jsonl`），一行一条 JSON。
-
-写台账失败不影响审批本身（`appendRecord` 吞掉异常），读的时候坏行跳过——它是日志，不是状态机。
-
-## 提供的工具
+两个工具：
 
 | 工具 | 作用 |
 |---|---|
 | `approval_ledger_query` | 按工具/风险/决策/结果/时间查询记录 |
 | `approval_ledger_stats` | 总数、高危数、被拒数，以及按风险/决策/结果/工具的分布 |
 
-## 企业审计面板
-
-宿主有 `webServer` 时（`ctx.inject(['webServer'], ...)`，没有就静默跳过），插件在 `/approval-ledger/` 下挂四类端点：
+审计面板（宿主有 `webServer` 时自动挂载，没有就跳过）：
 
 | 路径 | 内容 |
 |---|---|
-| `/approval-ledger` | 服务端渲染的 HTML 面板（卡片 + 风险分布条 + 最近 50 条表格 + 刷新/导出按钮） |
+| `/approval-ledger` | 服务端渲染的 HTML 面板（卡片 + 风险分布 + 最近 50 条 + 刷新/导出） |
 | `/approval-ledger/data` | 同源 JSON：`{ plan, counts, records }` |
-| `/approval-ledger/export` | 带 `content-disposition` 的审计报告下载（`deepwhale.approval-ledger/v1`） |
-| 其他 | 404 JSON |
+| `/approval-ledger/export` | 带 `content-disposition` 的审计报告（`deepwhale.approval-ledger/v1`） |
 
-面板右下角有一个 "powered by dwh" 徽章，由 `renderDashboardHtml({ badgeUrl, badgeHref })` 参数控制（传 `badgeUrl: ''` 即隐藏）——二次开发时白标替换的入口就在这里。
+### 桌面浮窗
+
+设置 → **Attention Toast** 里配置；行为细节见下表：
+
+| 能力 | 行为 |
+|---|---|
+| 三档任务模式 | `mainline`：标记会话立即弹、其余汇总一次；`balanced`：逐个弹；`silent`：完成/失败不弹，提问与审批仍弹 |
+| 当前会话三档 | `hidden` / `unfocused` / `always`（旧配置 `notifyCurrent=true` 自动迁移到 `always`） |
+| 等待子智能体 | 父会话完成但仍有 running 子会话时挂起，整波空闲再弹 |
+| 会话静音 | 会话行「…」菜单 🔕，该会话所有事件不弹 |
+| 审批浮窗 | 请求时弹「等待审批 + 会话标题 + 工具 — 理由 — 预判风险」；批准/拒绝后不再弹结果卡 |
+| 点击跳转 | 点浮窗切到对应会话；多会话汇总时弹会话选择器 |
+| 台账联动 | 设置页显示"最近 5 条 + 连接状态"，台账缺失自动降级为"预判浮窗不受影响" |
+
+浮窗宿主是常驻进程，走 JSON Lines：`show` / `close` / `close-all` / `config` / `preview` / `ping` / `shutdown` → `ready` / `shown` / `closed` / `clicked` / `error`。Windows 用 WPF（`lib/attention/toast_host.ps1`），Linux 用 GTK3（`lib/attention/toast_host.py`）。
+
+## 安装
+
+本仓库不发布到 npm，从源码装（**用 tarball，不要用 `link:`**——`link:` 会在 profile 里做目录联接，删 profile 前必须摘掉，否则跟着清空源目录）：
+
+```powershell
+npm install          # zod + 测试用的 dsh-tools
+npm pack             # 产出 dsh-approval-toast-0.3.0.tgz
+
+dsh plugin --profile desktop add .\dsh-approval-toast-0.3.0.tgz
+```
+
+装完**重启 DSH**：宿主半边（`lib/index.js`、`lib/attention/`）不会热重载，纯客户端（`lib/client.js`）改完 Ctrl+R 即可。
+
+## 配置
+
+台账半边读 DSH 插件配置（字段定义在 `lib/ledger/index.js` 的 `DEFAULT_CONFIG`）：
+
+| 字段 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `mode` | `ledger` / `gate` / `auto` | `ledger` | 见上表 |
+| `allowlist` | `string[]` | `[]` | `auto` 模式直接放行的工具名 |
+| `denyPatterns` | `string[]` | `[]` | 追加高危正则；**同时**影响台账记录与浮窗预判 |
+| `ledgerDir` | `string` | `''` | 台账目录；空则 `$DSH_HOME/approval-ledger` |
+| `licenseKey` | `string` | `''` | 形如 `DWH-ENT-XXXX-XXXX` 视为企业授权，只影响面板导出标记 |
+| `toast.spawn` | `boolean` | `true` | `false` = 只跑台账、不起浮窗进程（无桌面/无头环境） |
+
+浮窗外观（颜色、时长、同屏数量、语言）存在 `$DSH_HOME/storages/dsh-approval-toast/config.json`，由设置页写入；首次启动会从旧的 `storages/dsh-attention-toast/config.json` 复制一份，老用户设置不丢。
 
 ## 目录结构
 
 ```
-lib/index.js      审批监听、风险分级、台账读写、两个查询工具、webServer 路由
-lib/dashboard.js  面板 HTML 模板、导出报告结构、授权状态判定
-tests/test-ledger.mjs  node:test 单测（风险分级 / 读写筛选 / 三种模式 / 面板端点）
-cordis.patch.yml  插件组合层：向 profile 插入 approval-ledger
-icon.svg          插件图标
+lib/index.js                合成入口：先挂浮窗观察者，再挂台账决策者，注入统一风险分类器
+lib/ledger/index.js         台账半边：approval hook、风险分级、JSONL 读写、两个工具、面板路由
+lib/ledger/dashboard.js     HTML 面板、导出报告、授权状态
+lib/attention/index.js      浮窗宿主半边：Typert 服务 attentionToast、弹窗进程、点击队列
+lib/attention/ledger-reader.js  台账 JSONL 的增量只读投影（坏行容错）
+lib/attention/host-events.js    原生宿主事件解析 + 去重点击队列
+lib/attention/toast-registry.js 浮窗 id → 会话/目标 的 TTL 注册表
+lib/attention/toast_host.ps1    Windows WPF 宿主（UTF-8 **带 BOM**）
+lib/attention/toast_host.py     Linux GTK3 宿主
+lib/client.js               浏览器半边：设置页、通知引擎、审批/提问预判、点击跳转
+lib/typert.host.js          Typert 清单（service: attentionToast）
+tests/                      53 个用例，7 个文件
 ```
-
-## 二次开发
-
-```powershell
-git clone https://github.com/4478sc/DSH_Monitor
-cd DSH_Monitor
-npm install
-npm test              # node --test（自动发现 tests/ 下的用例）
-```
-
-常见改动点：
-
-| 想改什么 | 改哪里 |
-|---|---|
-| 高危/中危判定规则 | `lib/index.js` 的 `HIGH_RISK_PATTERNS` / `MEDIUM_RISK_PATTERNS` / `WRITE_TOOL_HINTS` |
-| 新增运行模式 | `DEFAULT_CONFIG.mode` 的取值集合 + `resolveConfig` 校验 + `apply` 里的分支 |
-| 台账字段、存储后端 | `appendRecord` / `readRecords`（当前是 JSONL 追加写） |
-| 面板外观、白标 | `lib/dashboard.js` 的 `renderDashboardHtml` |
-| 导出报告结构 | `buildExport`（注意 `format: 'deepwhale.approval-ledger/v1'` 是协议串，改了要同步消费方） |
-| 去掉商业授权框架 | `licenseStatus` / `licenseKey` 及 `/data` 返回的 `plan` 字段 |
-
-改完重新 `npm pack` + `dsh plugin add` + 重启 DSH 即可（见上）。
 
 ## 测试
 
 ```sh
-npm test
+npm test        # node --test
 ```
 
-覆盖：风险分级（高/中/低与自定义 `denyPatterns`）、台账追加/读取/筛选/统计、`ledger` / `gate` / `auto` 三种模式的决策路径、查询与统计工具输出、面板三个端点的响应头与结构、未授权时的 `trial` 标记。CI 在 Node 20 / 22 / 24 上跑同一套用例。
+| 文件 | 覆盖 |
+|---|---|
+| `tests/ledger.test.mjs` | 风险分级、台账读写筛选、三种模式、查询统计工具、面板三个端点 |
+| `tests/merge.test.mjs` | **合并契约**：一次 mount 两半都在；`gate` 拒绝时浮窗仍拿到 pending；三种模式与下游调用；自定义 `denyPatterns` 双向生效；风险口径一致 |
+| `tests/manifest.test.mjs` | Typert 清单自洽（package 归属、id、strict codec） |
+| `tests/ledger-reader.test.mjs` | 记录归一化、delegated 按 outcome 分类、坏行跳过 |
+| `tests/toast-registry.test.mjs` | 浮窗目标归一化、TTL 与上限淘汰 |
+| `tests/host-events.test.mjs` | 宿主事件解析、点击去重与 ack |
+| `tests/client-logic.test.mjs` | 设置迁移、三档决策、汇总、点击跳转、设置页结构回归 |
 
-## 安全边界
+CI 在 **Ubuntu + Windows** 上跑同一套（Windows 额外校验 PowerShell 宿主能解析、且 BOM 还在）。
 
-- 默认只读记录，**不替用户做决定**
-- `gate` / `auto` 必须显式配置；`gate` 只拦"高危特征"，不是完整安全策略
-- 台账只写本地文件，不上传、不联网
+## 合并时改了什么
 
-## 与原仓库的差异
+代码不是简单拼接，逐项说明（PR 里可复核）：
 
-代码主体（`lib/`、`tests/`）与上游 `v0.2.8` 完全一致，本仓库只做"能长期维护"的配套改动：
+1. **新增 `lib/index.js` 合成入口。** 只导出 `name` / `inject` / `apply`；挂载顺序固定为"浮窗 → 台账"，解决 gate 模式吞掉 pending 的竞态。
+2. **台账半边搬到 `lib/ledger/`**，逻辑未改：`classifyRisk` / `appendRecord` / `readRecords` / `filterRecords` / `summarize` / 两个工具 / 三个面板端点全部保留。
+3. **浮窗半边搬到 `lib/attention/`**，只加三个接缝：`apply(ctx, options)` 接受注入的 `classify` 与 `spawn: false`（测试/无头）；存储目录迁到 `storages/dsh-approval-toast` 并自动继承旧配置；`predictRisk` 退化为无注入时的兜底。
+4. **包身份统一**为 `dsh-approval-toast`：Typert 清单的 `package` 与 9 个 invocation id、客户端贡献 id 同步改名（loader 会校验 `manifest.package === package.json name`）。
+5. **恢复被截断的 Windows 宿主**：上游仓库 `af69b6c` 里 `lib/toast_host.ps1` 只剩 3 字节 BOM（文件被清空但 BOM 保留），这里用实际发布过的 `.20` 构建内容补回（14456 字节），CI 增加 BOM 断言防止再犯。
+6. **测试合并**：原有 9 + 38 个用例保留，新增 6 个合并契约用例，共 53 个，单条命令跑完。
+7. **文档与法务**：README 双语合一；`LICENSE` 保留三方版权行；`THIRD-PARTY-NOTICES.md` 把台账从"可选、不打包"改成"已内置"。
 
-1. `package.json`：`repository` / `homepage` / `bugs` 指向本仓库，新增 `scripts.test`、`contributors`、`bugs`，`files` 补 `README.en.md`，keywords 增补 `audit-ledger` / `compliance`；`name`、`version`、依赖与 `dsh` 字段保持不变。
-2. `LICENSE`：保留上游版权行，增加二次开发版权行（MIT 要求保留原声明）。
-3. `README.md`：重写（上游 README 顶部标题重复了一次），补复刻声明、配置表、面板端点、目录结构、二次开发指南。
-4. 新增 `.gitattributes`、`.github/workflows/test.yml`；`.gitignore` 补充本地产物。
+## 已知边界
+
+- `gate` 只拦"高危特征"，不是完整安全策略；预判风险是本地正则，**仅供参考、不构成安全保证**。
+- 浮窗宿主是独立进程；Windows 侧样式全靠 WPF，改 `toast_host.ps1` 后必须确认 BOM 还在（否则中文解析失败、无任何卡片）。
+- 一个审批只该一张卡：`client.js` 的 `deliver()` 里 `if (event.kind === 'permission') return` 是去重关键，别删。
+- 面板的"企业授权"是上游作者的商业点（`DWH-ENT-*`），二次开发可以直接移除，不影响记录与导出。
+
+---
+
+## English
+
+**One DSH plugin: an approval ledger plus desktop toasts.**
+
+This repository merges two previously separate plugins:
+
+- `@deepwhale-cn/dsh-approval-ledger` ([feely0208/dsh-approval-ledger](https://github.com/feely0208/dsh-approval-ledger)) — records every approval (tool, reason, risk, decision, outcome), adds the `approval_ledger_query` / `approval_ledger_stats` tools, an optional `gate` mode that rejects high-risk operations, and a `/approval-ledger` audit dashboard.
+- `dsh-attention-toast` ([4478sc/DSH_AttentionPlugins_Desktop](https://github.com/4478sc/DSH_AttentionPlugins_Desktop)) — bottom-right desktop toasts (Windows WPF / Linux GTK3) for completed, failed, question and approval events, with task modes, per-session mute, wait-for-subagents and click-to-navigate.
+
+They were already coupled through one file (`$DSH_HOME/approval-ledger/ledger.jsonl`); merging turns that into an in-process contract:
+
+1. **Ordering.** `lib/index.js` mounts the toast observer before the ledger decider, so a `gate`-mode rejection can no longer swallow the "waiting for approval" toast.
+2. **One risk scale.** The ledger's `classifyRisk` (including `denyPatterns`) feeds the toast hint, so the badge on the card and the `risk` field in the ledger always agree.
+3. **One install, one settings page, one version.**
+
+Install from source (tarball, never `link:`):
+
+```powershell
+npm install
+npm pack
+dsh plugin --profile desktop add .\dsh-approval-toast-0.3.0.tgz
+```
+
+Tests: `npm test` (53 cases, 7 files, Ubuntu + Windows CI).
 
 ## License
 
-MIT © 温州深鲸智能科技有限公司（原作）· 4478sc（复刻与二次开发部分）
+MIT © 4478sc · 温州深鲸智能科技有限公司 (approval ledger) · zjbc2000 (attention-plugins) · YiMlT (dsh-notify-yimit).
+See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for the full attribution chain.
