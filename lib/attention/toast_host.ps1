@@ -173,7 +173,8 @@ function Get-OwnerPids {
   return $set
 }
 function Raise-OwnerWindow {
-  $pids = Get-OwnerPids
+  $script:OwnerPidSet = Get-OwnerPids
+  $pids = $script:OwnerPidSet
   if ($pids.Count -eq 0) { return $false }
   $script:OwnerHwnd = [IntPtr]::Zero
   try {
@@ -181,7 +182,7 @@ function Raise-OwnerWindow {
       param([IntPtr]$hwnd, [IntPtr]$lparam)
       $windowPid = [uint32]0
       [void][OwnerWindow]::GetWindowThreadProcessId($hwnd, [ref]$windowPid)
-      if ($pids.ContainsKey($windowPid) -and [OwnerWindow]::IsWindowVisible($hwnd) -and [OwnerWindow]::GetWindow($hwnd, 4) -eq [IntPtr]::Zero) {
+      if ($script:OwnerPidSet.ContainsKey($windowPid) -and [OwnerWindow]::IsWindowVisible($hwnd) -and [OwnerWindow]::GetWindow($hwnd, 4) -eq [IntPtr]::Zero) {
         if ([OwnerWindow]::GetWindowTextLength($hwnd) -gt 0) { $script:OwnerHwnd = $hwnd; return $false }
         if ($script:OwnerHwnd -eq [IntPtr]::Zero) { $script:OwnerHwnd = $hwnd }
       }
