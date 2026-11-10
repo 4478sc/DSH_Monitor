@@ -277,3 +277,21 @@ test('the grants tool lists and revokes live grants', async () => {
   await waterfall(mounted, escalation('c2'), () => { asked += 1; return 'allowed-once' })
   assert.equal(asked, 1, 'after a revoke the request is asked again')
 })
+test('the grants tool hides danger-full-access grants that cannot fire', async () => {
+  const ledgerDir = makeLedgerDir()
+  const mounted = mount({ mode: 'ledger', ledgerDir, sessionGrants: GRANT_CONFIG })
+  const grantsTool = mounted.tools.find((tool) => tool.name === 'approval_ledger_grants')
+  await waterfall(mounted, escalation('d1', 'workspace-write'), () => 'allowed-once')
+  await waterfall(mounted, escalation('d2', 'danger-full-access', 'need wide access'), () => 'allowed-once')
+  const listed = await grantsTool.execute({ action: 'list' })
+  assert.match(listed, /workspace-write/)
+  assert.doesNotMatch(listed, /danger-full-access/)
+
+  const permissive = mount({
+    mode: 'ledger',
+    ledgerDir,
+    sessionGrants: { ...GRANT_CONFIG, allowDangerFullAccess: true },
+  })
+  const permissiveList = await permissive.tools.find((tool) => tool.name === 'approval_ledger_grants').execute({ action: 'list' })
+  assert.match(permissiveList, /danger-full-access/)
+})
