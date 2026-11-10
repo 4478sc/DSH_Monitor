@@ -295,3 +295,60 @@ test('the grants tool hides danger-full-access grants that cannot fire', async (
   const permissiveList = await permissive.tools.find((tool) => tool.name === 'approval_ledger_grants').execute({ action: 'list' })
   assert.match(permissiveList, /danger-full-access/)
 })
+
+test('the settings page switches override the static config', async () => {
+  const ledgerDir = makeLedgerDir()
+  const { writeSettings } = await import('../lib/ledger/settings.js')
+  const mounted = mount({ mode: 'ledger', ledgerDir })
+  let asked = 0
+  const answer = () => { asked += 1; return 'allowed-once' }
+
+  await waterfall(mounted, escalation('c1'), answer)
+  await waterfall(mounted, escalation('c2'), answer)
+  assert.equal(asked, 2, 'off by default: both requests ask')
+
+  writeSettings(ledgerDir, { sessionGrants: { enabled: true } })
+  await waterfall(mounted, escalation('c3'), answer)
+  assert.equal(asked, 2, 'the earlier approvals are now a live grant')
+
+  writeSettings(ledgerDir, { sessionGrants: { enabled: false } })
+  await waterfall(mounted, escalation('c4'), answer)
+  assert.equal(asked, 3, 'switching it off in the UI asks again')
+})
+
+test('a danger-full-access grant is capped at five uses', async () => {
+  const mounted = mount({
+    mode: 'ledger',
+    ledgerDir: makeLedgerDir(),
+    sessionGrants: { enabled: true, allowDangerFullAccess: true, dangerMaxUses: 5, maxUses: 20 },
+  })
+  let asked = 0
+  const answer = () => { asked += 1; return 'allowed-once' }
+  const request = (id) => escalation(id, 'danger-full-access', 'write outside the workspace')
+
+  await waterfall(mounted, request('c1'), answer)
+  assert.equal(asked, 1)
+  for (let i = 0; i < 5; i += 1) await waterfall(mounted, request('auto' + i), answer)
+  assert.equal(asked, 1, 'five uses are answered by the grant')
+  await waterfall(mounted, request('sixth'), answer)
+  assert.equal(asked, 2, 'the sixth one asks again')
+})
+
+test('deleting files still asks under a danger-full-access grant', async () => {
+  const mounted = mount({
+    mode: 'ledger',
+    ledgerDir: makeLedgerDir(),
+    sessionGrants: { enabled: true, allowDangerFullAccess: true, dangerMaxUses: 5 },
+  })
+  let asked = 0
+  const answer = () => { asked += 1; return 'allowed-once' }
+
+  await waterfall(mounted, escalation('c1', 'danger-full-access', 'write outside the workspace'), answer)
+  assert.equal(asked, 1)
+  const outcome = await waterfall(mounted, escalation('c2', 'danger-full-access', 'delete ~/Downloads/old.zip'), answer)
+  assert.equal(outcome, 'allowed-once')
+  assert.equal(asked, 2, 'the deletion request is asked despite the live grant')
+
+  const rows = readLedger(mounted.ledgerDir)
+  assert.equal(rows[1].sandboxMode, 'danger-full-access')
+})

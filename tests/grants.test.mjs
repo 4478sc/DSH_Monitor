@@ -9,6 +9,7 @@ import {
   grantBlockReason,
   grantKeyOf,
   grantUsage,
+  isDestructive,
   parseGrantKey,
   readRevocations,
   revoke,
@@ -141,4 +142,23 @@ test('revocations persist atomically and survive a re-read', () => {
   assert.equal(clearRevocation(dir, 's1::bash::workspace-write'), false, 'second clear is a no-op')
   assert.equal(revokedAtOf(readRevocations(dir), 's1::bash::workspace-write'), null)
   assert.equal(readRevocations(dir).revocations.length, 1)
+})
+test('destructive detection is conservative and covers the usual spellings', () => {
+  assert.equal(isDestructive({ toolName: 'bash', reason: 'escalate sandbox to danger-full-access: rm -rf /tmp/x' }), true)
+  assert.equal(isDestructive({ toolName: 'bash', reason: 'delete the old build artifacts' }), true)
+  assert.equal(isDestructive({ toolName: 'fs_delete', reason: 'clean up' }), true)
+  assert.equal(isDestructive({ toolName: 'bash', reason: '删除临时目录' }), true)
+  assert.equal(isDestructive({ toolName: 'bash', reason: 'git clean -fdx' }), true)
+  assert.equal(isDestructive({ toolName: 'bash', reason: 'run the test suite' }), false)
+  assert.equal(isDestructive({ toolName: 'pwsh', reason: 'install dependencies' }), false)
+  assert.equal(isDestructive({}), false)
+})
+
+test('a destructive danger-full-access request is never answered by a grant', () => {
+  const permissive = { allowDangerFullAccess: true, alwaysAsk: [] }
+  const verdict = { sandboxMode: 'danger-full-access' }
+  assert.equal(grantBlockReason(permissive, { toolName: 'bash', reason: 'rm -rf ~/Downloads/x' }, verdict, { level: 'low' }), 'destructive')
+  assert.equal(grantBlockReason(permissive, { toolName: 'bash', reason: 'write outside the workspace' }, verdict, { level: 'low' }), '')
+  // workspace-write deletions are governed by the risk rules, not by this veto
+  assert.equal(grantBlockReason(permissive, { toolName: 'bash', reason: 'rm build/out.log' }, { sandboxMode: 'workspace-write' }, { level: 'medium' }), '')
 })
