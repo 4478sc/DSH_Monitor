@@ -102,6 +102,7 @@ $script:Kicker = @{
 $script:Toasts = New-Object System.Collections.ArrayList
 $script:OwnerPid = 0
 $script:OwnerHwnd = [IntPtr]::Zero
+$script:OwnerExe = ''
 $script:Seq = 0
 $script:Running = $true
 
@@ -150,14 +151,27 @@ function Get-PidChain([int]$start) {
   return $chain
 }
 
+# The window belongs to the Electron main process, an ancestor of this host,
+# not to the pid the plugin reports (that is the plugin-host child). Walk both
+# ancestries and keep the pids that run the same executable as the plugin host,
+# so a shell or explorer window in the chain can never win the match.
 function Get-OwnerPids {
   $set = @{}
+  $ownerPid = [uint32]$script:OwnerPid
   foreach ($p in @((Get-PidChain $PID) + (Get-PidChain ([int]$script:OwnerPid)))) {
-    if ($p -gt 0) { $set[[uint32]$p] = $true }
+    if ($p -le 0) { continue }
+    $candidate = [uint32]$p
+    if ($candidate -eq $ownerPid) { $set[$candidate] = $true; continue }
+    if ($script:OwnerExe -eq '') { $set[$candidate] = $true; continue }
+    $path = ''
+    try {
+      $proc = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $candidate) -ErrorAction Stop
+      if ($null -ne $proc) { $path = [string]$proc.ExecutablePath }
+    } catch { $path = '' }
+    if ($path -ne '' -and $path -ieq $script:OwnerExe) { $set[$candidate] = $true }
   }
   return $set
 }
-
 function Raise-OwnerWindow {
   $pids = Get-OwnerPids
   if ($pids.Count -eq 0) { return $false }
@@ -349,7 +363,10 @@ function Handle-Command([string]$line) {
   switch ([string]$msg.cmd) {
     'show' { [void](Show-Toast $msg) }
     'close' { $t0 = Get-ToastById ([string]$msg.id); if ($t0) { Close-Toast $t0 'request' } }
-    'owner' { try { $script:OwnerPid = [int]$msg.pid } catch { $script:OwnerPid = 0 } }    'debug-click' { Invoke-ToastClick ([string]$msg.id) }
+    'owner' {
+      try { $script:OwnerPid = [int]$msg.pid } catch { $script:OwnerPid = 0 }
+      try { $script:OwnerExe = [string]$msg.exe } catch { $script:OwnerExe = '' }
+    }    'debug-click' { Invoke-ToastClick ([string]$msg.id) }
     'debug-ancestors' { $pids = Get-OwnerPids; Write-Event @{ event = 'ancestors'; pids = @($pids.Keys) } }
     'close-all' { foreach ($t0 in @($script:Toasts)) { Close-Toast $t0 'request' } }
     'config' {

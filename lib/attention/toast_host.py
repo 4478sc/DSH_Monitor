@@ -204,8 +204,10 @@ class Host:
     def __init__(self):
         self.config = json.loads(json.dumps(DEFAULT_CONFIG))
         self.toasts = []
-        # pid of the DSH process whose window a click should raise (issue #1).
+        # pid of the DSH process whose window a click should raise (issue #1),
+        # plus the executable that owns the window (the Electron main process).
         self.owner_pid = 0
+        self.owner_exe = ""
         self.screen = Gdk.Screen.get_default()
         self.monitor = Gdk.Display.get_default().get_primary_monitor()
         self.provider = Gtk.CssProvider()
@@ -271,7 +273,18 @@ class Host:
         """
         pids = []
         for pid in self._pid_chain(os.getpid()) + self._pid_chain(self.owner_pid):
-            if pid and pid not in pids:
+            if not pid or pid in pids:
+                continue
+            if pid == self.owner_pid or not self.owner_exe:
+                pids.append(pid)
+                continue
+            try:
+                exe = os.readlink("/proc/%d/exe" % pid)
+            except Exception:
+                exe = ""
+            # Keep only processes running the same binary as the plugin host, so
+            # a shell or file manager in the ancestry can never win the match.
+            if exe and exe == self.owner_exe:
                 pids.append(pid)
         return pids
 
@@ -356,6 +369,7 @@ class Host:
                 self.owner_pid = int(msg.get("pid") or 0)
             except Exception:
                 self.owner_pid = 0
+            self.owner_exe = str(msg.get("exe") or "")
             emit({"event": "owner", "ok": True})
         elif cmd == "shot":
             path = msg.get("path") or "/tmp/toast.png"
