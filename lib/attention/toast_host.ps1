@@ -41,10 +41,10 @@ public static class OwnerWindow {
   [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool altTab);
   [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
   [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
-  [DllImport("kernel32.dll")] static extern bool Process32First(IntPtr snap, ref PROCESSENTRY32 entry);
-  [DllImport("kernel32.dll")] static extern bool Process32Next(IntPtr snap, ref PROCESSENTRY32 entry);
+  [DllImport("kernel32.dll", CharSet = CharSet.Ansi)] static extern bool Process32First(IntPtr snap, ref PROCESSENTRY32 entry);
+  [DllImport("kernel32.dll", CharSet = CharSet.Ansi)] static extern bool Process32Next(IntPtr snap, ref PROCESSENTRY32 entry);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
-  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
   public struct PROCESSENTRY32 {
     public uint dwSize; public uint cntUsage; public uint th32ProcessID; public IntPtr th32DefaultHeapID;
     public uint th32ModuleID; public uint cntThreads; public uint th32ParentProcessID; public int pcPriClassBase;
