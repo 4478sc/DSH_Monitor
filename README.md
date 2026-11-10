@@ -1,11 +1,13 @@
 # dsh-approval-toast
 
-**审批台账 + 桌面浮窗通知，一个 DSH 插件。**
+**审批台账 + 桌面浮窗通知 + 会话内授权记忆，一个 DSH 插件。**
 
 [![test](https://github.com/4478sc/DSH_Monitor/actions/workflows/test.yml/badge.svg)](https://github.com/4478sc/DSH_Monitor/actions/workflows/test.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-0f9b8e.svg)](LICENSE)
 
-> Records every operation that needed approval (tool, reason, risk, decision, outcome), can reject high-risk ones, and — separately — pops bottom-right desktop toasts when a task finishes, fails, asks a question, or waits for approval. One install, one settings surface, one ledger.
+> Records every operation that needed approval (tool, reason, risk, decision, outcome), can reject high-risk ones, and — separately — pops bottom-right desktop toasts when a task finishes, fails, asks a question, or waits for approval. Clicking a toast restores the DSH window and jumps straight to the session (and to the pending card, when there is one). One install, one settings surface, one ledger.
+
+**Current version `0.7.19`** | Windows (WPF) + Linux (GTK3) | 88 cases / 10 files
 
 ![Windows toast](docs/images/toast-win.png)
 
@@ -89,15 +91,22 @@ Linux 侧的置前只在 **X11 / XWayland** 窗口上有效，两道前提缺一
 
 两个前提没满足时，**点击仍然会打开正确会话**，只是窗口不会被拉到前台（`raise_owner()` 返回 false，不报错）。确实需要 Linux 置前时，用 `--ozone-platform=x11` 启动 DSH 走 XWayland，再按上面的方式点浮窗即可。
 
+## 近期变化
+
+- **点击即到（0.7）**：点浮窗时由原生宿主把 DSH 窗口**还原 + 置前**（Windows：`AttachThreadInput` + `ShowWindow(SW_RESTORE)`；Linux：`xdotool windowactivate`），随后浏览器半边打开会话并定位到 `[data-approval-key]` 那张待审批卡片；提醒已被处理时弹“提醒已过期”。最小化状态点一次即可，不需要先唤醒再点第二下。
+- **会话授权只有一个开关（0.6）**：同时覆盖 `workspace-write` 与 `danger-full-access`（要么都记、要么都不记），danger 档仍受 **5 次上限**和“删除文件永不自动放行”约束。
+- **可诊断（0.7）**：`host.log` 里每次点击都有 `raise ok=… debug=…`，Linux 另有独立的 `raise.log`；宿主支持 `debug-ancestors` / `debug-raise` / `debug-desktop` 探针命令。
+- 真机上挖出并修掉的缺陷：pid 传错、宿主命中自己的浮窗卡片、P/Invoke 类未编译、Toolhelp 文件名乱码、WMI 不可靠、`--onlyvisible` 跳过最小化窗口。
+
 ## 安装
 
 本仓库不发布到 npm，从源码装（**用 tarball，不要用 `link:`**——`link:` 会在 profile 里做目录联接，删 profile 前必须摘掉，否则跟着清空源目录）：
 
 ```powershell
 npm install          # zod + 测试用的 dsh-tools
-npm pack             # 产出 dsh-approval-toast-0.5.0.tgz
+npm pack             # 产出 dsh-approval-toast-0.7.19.tgz
 
-dsh plugin --profile desktop add .\dsh-approval-toast-0.5.0.tgz
+dsh plugin --profile desktop add .\dsh-approval-toast-0.7.19.tgz
 ```
 
 装完**重启 DSH**：宿主半边（`lib/index.js`、`lib/attention/`）不会热重载，纯客户端（`lib/client.js`）改完 Ctrl+R 即可。
@@ -219,7 +228,7 @@ CI 在 **Ubuntu + Windows** 上跑同一套（Windows 额外校验 PowerShell �
 3. **浮窗半边搬到 `lib/attention/`**，只加三个接缝：`apply(ctx, options)` 接受注入的 `classify` 与 `spawn: false`（测试/无头）；存储目录迁到 `storages/dsh-approval-toast` 并自动继承旧配置；`predictRisk` 退化为无注入时的兜底。
 4. **包身份统一**为 `dsh-approval-toast`：Typert 清单的 `package` 与 9 个 invocation id、客户端贡献 id 同步改名（loader 会校验 `manifest.package === package.json name`）。
 5. **恢复被截断的 Windows 宿主**：上游仓库 `af69b6c` 里 `lib/toast_host.ps1` 只剩 3 字节 BOM（文件被清空但 BOM 保留），这里用实际发布过的 `.20` 构建内容补回（14456 字节），CI 增加 BOM 断言防止再犯。
-6. **测试合并**：原有 9 + 38 个用例保留，新增 6 个合并契约用例，共 53 个，单条命令跑完。
+6. **测试合并**：合并时原有 9 + 38 个用例保留、新增 6 个合并契约用例；此后随会话授权与点击链路增至 **88 个用例 / 10 个文件**，仍是单条命令跑完。
 7. **文档与法务**：README 双语合一；`LICENSE` 保留三方版权行；`THIRD-PARTY-NOTICES.md` 把台账从"可选、不打包"改成"已内置"。
 8. **补上 0.2.9 的行为**：台账文件在插件加载时就创建（而不是等第一次审批），这样浮窗设置页一装好就显示"已连接"；`tests/merge.test.mjs` 增加了对应断言。
 
@@ -231,12 +240,14 @@ CI 在 **Ubuntu + Windows** 上跑同一套（Windows 额外校验 PowerShell �
 - 面板的"企业授权"是上游作者的商业点（`DWH-ENT-*`），二次开发可以直接移除，不影响记录与导出。
 - 会话授权（`sessionGrants`）默认关闭；粒度是"工具 + sandbox 模式"，不是"这条命令"——DSH 的审批请求不带工具参数，想要命令级记忆需要在实现里用 `callId` 去会话日志回捞参数（未实现）。
 - 删除类操作的识别是**关键字**判断（工具名 + 模型的理由），因为审批请求不带参数；误判的代价只是多问你一次。
+- **Linux 置前要求 X11/XWayland 窗口**：DSH 若以 Wayland 原生方式运行（Electron `--ozone-platform=wayland`，Ubuntu 22.04+ 默认），xdotool/wmctrl 看不到窗口，置前会被跳过——点击仍能打开会话；想让置前生效就用 `--ozone-platform=x11` 启动 DSH。
+- 浮窗宿主是长驻进程：升级插件后要 **设置 → Attention Toast → 重启宿主**（或重启 DSH）才会加载新宿主；纯客户端改动 Ctrl+R 即可。
 
 ---
 
 ## English
 
-**One DSH plugin: an approval ledger plus desktop toasts.**
+**One DSH plugin: an approval ledger, desktop toasts, and per-session approval memory.**
 
 This repository merges two previously separate plugins:
 
@@ -249,12 +260,18 @@ They were already coupled through one file (`$DSH_HOME/approval-ledger/ledger.js
 2. **One risk scale.** The ledger's `classifyRisk` (including `denyPatterns`) feeds the toast hint, so the badge on the card and the `risk` field in the ledger always agree.
 3. **One install, one settings page, one version.**
 
+### What changed recently
+
+- **0.7 — a click lands.** The native host restores and raises the DSH window, the browser half opens the session from the toast registry (never by title), and approval toasts focus the actual pending card (`[data-approval-key]`). A click from a minimized window is answered in one step; a reminder that is already resolved says so instead of opening an empty conversation.
+- **0.6 — one switch for session grants.** It covers `workspace-write` and `danger-full-access` together, with a hard 5-use cap on the danger tier and file deletions never auto-approved.
+- **0.7 — diagnosable.** `host.log` records `raise ok=… debug=…` for every click, Linux also writes `raise.log`, and the host answers `debug-ancestors` / `debug-raise` / `debug-desktop`.
+
 Install from source (tarball, never `link:`):
 
 ```powershell
 npm install
 npm pack
-dsh plugin --profile desktop add .\dsh-approval-toast-0.5.0.tgz
+dsh plugin --profile desktop add .\dsh-approval-toast-0.7.19.tgz
 ```
 
 ### Clicking a toast raises DSH and lands on the interaction
