@@ -304,7 +304,15 @@ class Host:
         self._raise_log = ["pids=" + ",".join(str(p) for p in pids)]
         if not pids:
             return False
-        for pid in pids:
+        # The toast host owns the toast windows itself, and they are the widest
+        # windows it can see while a toast is on screen: probing pids in order made
+        # it "activate" its own card and report success while DSH stayed behind.
+        # Walk the chain from the oldest ancestor down and skip our own pid.
+        own = os.getpid()
+        for pid in reversed(pids):
+            if pid == own:
+                self._raise_log.append("skip own pid %d" % pid)
+                continue
             # No --onlyvisible: a minimized window has _NET_WM_STATE_HIDDEN and is
             # not viewable, so filtering on visibility would skip exactly the window
             # the user wants back.
@@ -340,7 +348,14 @@ class Host:
                     except Exception as exc:
                         self._raise_log.append("  %s -> error %s" % (args[1], exc))
                         continue
-                return True
+                try:
+                    now = subprocess.run(["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=1.5)
+                    current = (now.stdout or "").strip()
+                except Exception:
+                    current = ""
+                if current == wid:
+                    return True
+                self._raise_log.append("  not active after activate (active=%s)" % (current or "?"))
         # Last resort: the ancestry can be wrong (a launcher, a wrapper), so also
         # accept the widest window whose title names the application.
         try:
