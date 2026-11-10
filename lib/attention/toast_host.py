@@ -291,6 +291,7 @@ class Host:
         the window just stays where it was.
         """
         pids = self._owner_pids()
+        self._raise_log = ["pids=" + ",".join(str(p) for p in pids)]
         if not pids:
             return False
         for pid in pids:
@@ -303,6 +304,7 @@ class Host:
                 ids = [line.strip() for line in (out.stdout or "").splitlines() if line.strip()]
             except Exception:
                 ids = []
+            self._raise_log.append("pid %d ids=%s" % (pid, " ".join(ids)))
             for wid in reversed(ids):
                 try:
                     geo = subprocess.run(["xdotool", "getwindowgeometry", "--shell", wid],
@@ -317,12 +319,16 @@ class Host:
                         except Exception:
                             width = 0
                 if width < 200:
+                    self._raise_log.append("wid %s width=%d skipped" % (wid, width))
                     continue
+                self._raise_log.append("activate wid %s width=%d" % (wid, width))
                 for args in (["xdotool", "windowactivate", "--sync", wid],
                              ["xdotool", "windowraise", wid]):
                     try:
-                        subprocess.run(args, timeout=2.0)
-                    except Exception:
+                        done = subprocess.run(args, timeout=2.0)
+                        self._raise_log.append("  %s -> %s" % (args[1], done.returncode))
+                    except Exception as exc:
+                        self._raise_log.append("  %s -> error %s" % (args[1], exc))
                         continue
                 return True
         try:
@@ -373,6 +379,13 @@ class Host:
         elif cmd == "config":
             self.set_config(msg.get("config") or {})
             emit({"event": "config", "ok": True})
+        elif cmd == "debug-raise":
+            ok = False
+            try:
+                ok = self.raise_owner()
+            except Exception as exc:
+                self._raise_log = getattr(self, "_raise_log", []) + ["exception %s" % exc]
+            emit({"event": "raise", "ok": bool(ok), "log": getattr(self, "_raise_log", [])})
         elif cmd == "debug-ancestors":
             emit({"event": "ancestors", "pids": self._owner_pids()})
         elif cmd == "owner":
