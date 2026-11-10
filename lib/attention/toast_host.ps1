@@ -40,6 +40,38 @@ public static class OwnerWindow {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool altTab);
   [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+  [DllImport("kernel32.dll")] static extern bool Process32First(IntPtr snap, ref PROCESSENTRY32 entry);
+  [DllImport("kernel32.dll")] static extern bool Process32Next(IntPtr snap, ref PROCESSENTRY32 entry);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+  public struct PROCESSENTRY32 {
+    public uint dwSize; public uint cntUsage; public uint th32ProcessID; public IntPtr th32DefaultHeapID;
+    public uint th32ModuleID; public uint cntThreads; public uint th32ParentProcessID; public int pcPriClassBase;
+    public uint dwFlags; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExeFile;
+  }
+  public static uint ParentOf(uint pid) {
+    IntPtr snap = CreateToolhelp32Snapshot(0x00000002, 0);
+    if (snap == new IntPtr(-1)) { return 0; }
+    try {
+      PROCESSENTRY32 entry = new PROCESSENTRY32();
+      entry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
+      if (!Process32First(snap, ref entry)) { return 0; }
+      do { if (entry.th32ProcessID == pid) { return entry.th32ParentProcessID; } } while (Process32Next(snap, ref entry));
+      return 0;
+    } finally { CloseHandle(snap); }
+  }
+  public static string ExeNameOf(uint pid) {
+    IntPtr snap = CreateToolhelp32Snapshot(0x00000002, 0);
+    if (snap == new IntPtr(-1)) { return ""; }
+    try {
+      PROCESSENTRY32 entry = new PROCESSENTRY32();
+      entry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
+      if (!Process32First(snap, ref entry)) { return ""; }
+      do { if (entry.th32ProcessID == pid) { return entry.szExeFile ?? ""; } } while (Process32Next(snap, ref entry));
+      return "";
+    } finally { CloseHandle(snap); }
+  }
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int pid);
@@ -111,6 +143,7 @@ $script:Toasts = New-Object System.Collections.ArrayList
 $script:OwnerPid = 0
 $script:OwnerHwnd = [IntPtr]::Zero
 $script:OwnerExe = ''
+$script:OwnerExeName = ''
 $script:Seq = 0
 $script:Running = $true
 
@@ -147,12 +180,10 @@ function Get-PidChain([int]$start) {
   $current = $start
   for ($i = 0; $i -lt 8 -and $current -gt 0; $i++) {
     $chain.Add($current)
-    $parent = 0
-    try {
-      $proc = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $current) -ErrorAction Stop
-      if ($null -eq $proc) { break }
-      $parent = [int]$proc.ParentProcessId
-    } catch { break }
+    # Toolhelp, not WMI: a DSH child process cannot be assumed to have a
+    # working WMI connection, and WMI failing here made the chain collapse to
+    # this process alone, so no ancestor window was ever found.
+    $parent = [int][OwnerWindow]::ParentOf([uint32]$current)
     if ($parent -le 0 -or $parent -eq $current) { break }
     $current = $parent
   }
@@ -174,13 +205,10 @@ function Get-OwnerPids {
     if ($p -le 0) { continue }
     $candidate = [uint32]$p
     if ($candidate -eq $ownerPid) { $set[$candidate] = $true; continue }
-    if ($script:OwnerExe -eq '') { $set[$candidate] = $true; continue }
-    $path = ''
-    try {
-      $proc = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $candidate) -ErrorAction Stop
-      if ($null -ne $proc) { $path = [string]$proc.ExecutablePath }
-    } catch { $path = '' }
-    if ($path -ne '' -and $path -ieq $script:OwnerExe) { $set[$candidate] = $true }
+    $wanted = if ($script:OwnerExeName -ne '') { $script:OwnerExeName } else { $script:OwnerExe }
+    if ($wanted -eq '') { $set[$candidate] = $true; continue }
+    $name = [string][OwnerWindow]::ExeNameOf($candidate)
+    if ($name -ne '' -and ($name -ieq $wanted -or ($script:OwnerExe -ne '' -and (Split-Path -Leaf $script:OwnerExe) -ieq $name))) { $set[$candidate] = $true }
   }
   return $set
 }
@@ -400,6 +428,7 @@ function Handle-Command([string]$line) {
     'owner' {
       try { $script:OwnerPid = [int]$msg.pid } catch { $script:OwnerPid = 0 }
       try { $script:OwnerExe = [string]$msg.exe } catch { $script:OwnerExe = '' }
+      try { $script:OwnerExeName = [string]$msg.exeName } catch { $script:OwnerExeName = '' }
     }    'debug-click' { Invoke-ToastClick ([string]$msg.id) }
     'debug-raise-timeline' {
       $raised = $false
