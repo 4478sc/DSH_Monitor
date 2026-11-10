@@ -1,0 +1,70 @@
+{
+  "name": "@deepwhale-cn/dsh-approval-ledger",
+  "version": "0.2.8",
+  "description": "审批台账 + 企业审计面板：记录每次审批（风险/决策/结果），gate 模式拦高危，Web 面板可看可导出",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "dsh": ">=0.1.0-rc.6 <0.3.0",
+    "node": ">=20"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "README.en.md",
+    "LICENSE",
+    "icon.svg"
+  ],
+  "scripts": {
+    "test": "node --test tests/"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "approval",
+    "audit",
+    "audit-ledger",
+    "ledger",
+    "security",
+    "compliance",
+    "deepwhale"
+  ],
+  "license": "MIT",
+  "author": "温州深鲸智能科技有限公司 <contact@deepwhale.org.cn>",
+  "contributors": [
+    "4478sc (复刻维护)"
+  ],
+  "homepage": "https://github.com/4478sc/DSH_Monitor#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/4478sc/DSH_Monitor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/4478sc/DSH_Monitor/issues"
+  },
+  "icon": "./icon.svg",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "meta": {
+    "title": "审批台账",
+    "description": "记录每一次需要审批的 agent 操作：风险、决策、结果，可查询可导出；gate 模式直接拦高危操作。"
+  }
+}

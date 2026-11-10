@@ -1,0 +1,4 @@
+# @deepwhale-cn/dsh-approval-ledger 的组合层
+- insert:
+    - id: approval-ledger
+      name: '@deepwhale-cn/dsh-approval-ledger'
