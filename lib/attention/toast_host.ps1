@@ -166,7 +166,11 @@ function Get-PidChain([int]$start) {
 function Get-OwnerPids {
   $set = @{}
   $ownerPid = [uint32]$script:OwnerPid
+  $selfPid = [uint32]$PID
+  # The host owns the toast cards; matching its own window would raise the card
+  # instead of the application (skip own pid).
   foreach ($p in @((Get-PidChain $PID) + (Get-PidChain ([int]$script:OwnerPid)))) {
+    if ([uint32]$p -eq $selfPid) { continue }
     if ($p -le 0) { continue }
     $candidate = [uint32]$p
     if ($candidate -eq $ownerPid) { $set[$candidate] = $true; continue }
