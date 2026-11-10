@@ -131,7 +131,7 @@ danger-full-access（默认）    → 照旧问你
 其余                         → await next()
 ```
 
-授权存在台账本身：一行 `delegated + allowed-once` 就是"你批准过"，一行 `source: session-grant` 就是"用掉一次"。唯一额外状态是撤销，写在 `<ledgerDir>/grants.json`（台账 append-only，不能靠删行撤销）。失效条件：过期、次数用尽、会话结束、被撤销、或命中上面任一否决。
+授权存在台账本身：一行 `delegated + allowed-once` 就是"你批准过"，一行 `source: session-grant` 就是"用掉一次"。唯一额外状态是撤销，写在 `<ledgerDir>/grants.json`（台账 append-only，不能靠删行撤销）。失效条件：过期、次数用尽、会话结束、被撤销、或命中上面任一否决。撤销不是永久的：**同一个键再手动批准一次，撤销即被清除、授权重新生效**（比时间戳比较可靠——撤销和批准可能落在同一毫秒）。
 
 自动放行**不会**弹"等待审批"卡片（浮窗那一侧的 pending 会被撤掉），但会：
 
@@ -230,7 +230,7 @@ dsh plugin --profile desktop add .\dsh-approval-toast-0.4.0.tgz
 - `danger-full-access` is never remembered unless `allowDangerFullAccess: true`;
 - `alwaysAsk` regexes, rejections and gate mode are never overridden.
 
-Grants live in the ledger itself (one `delegated + allowed-once` row is "the user said yes", one `source: session-grant` row is a use), so `approval_ledger_stats`, the dashboard and the audit export show exactly how often the plugin answered for you. `approval_ledger_grants` lists and revokes them. Granularity is per tool + mode because the approval waterfall carries no tool arguments — see the Chinese section above for why.
+Grants live in the ledger itself (one `delegated + allowed-once` row is "the user said yes", one `source: session-grant` row is a use), so `approval_ledger_stats`, the dashboard and the audit export show exactly how often the plugin answered for you. `approval_ledger_grants` lists and revokes them; a revoke is not permanent — approving the same key again clears it and re-arms the grant (comparing timestamps would be ambiguous, since a revoke and an approval can share a millisecond). Granularity is per tool + mode because the approval waterfall carries no tool arguments — see the Chinese section above for why.
 
 Tests: `npm test` (70 cases, 8 files, Ubuntu + Windows CI).
 

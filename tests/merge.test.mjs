@@ -244,6 +244,10 @@ test('alwaysAsk patterns and revocations both fall back to asking', async () => 
   revoke(ledgerDir, 's1::bash::workspace-write', Date.now() + 1000)
   await waterfall(mounted, escalation('c3'), answer)
   assert.equal(asked, 2, 'a revocation beats the grant')
+
+  // Approving the revoked key again is an explicit "remember it again".
+  await waterfall(mounted, escalation('c4'), answer)
+  assert.equal(asked, 2, 'the fresh approval cleared the revocation and re-armed the grant')
 })
 
 test('grants stay off unless enabled', async () => {

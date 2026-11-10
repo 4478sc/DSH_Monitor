@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import {
+  clearRevocation,
   escalationModeOf,
   grantBlockReason,
   grantKeyOf,
@@ -100,21 +101,17 @@ test('rejections and allowlist approvals neither grant nor spend', () => {
   assert.equal(usage.used, 0)
 })
 
-test('a revocation after the grant kills it, a later approval beats the revocation', () => {
+test('a revocation kills the grant until the key is approved again', () => {
   const granted = row()
-  const revokedAfter = { version: 1, revocations: [{ key: 's1::bash::workspace-write', at: Date.parse('2026-11-10T12:02:00.000Z') }] }
-  assert.equal(revokedAtOf(revokedAfter, 's1::bash::workspace-write'), Date.parse('2026-11-10T12:02:00.000Z'))
-  assert.equal(revokedAtOf(revokedAfter, 's1::bash::other'), null)
-  const blocked = grantUsage([granted], { ...BASE, revokedAt: Date.parse('2026-11-10T12:02:00.000Z') })
+  const blocked = grantUsage([granted], { ...BASE, revoked: true })
   assert.equal(blocked.revoked, true)
   assert.equal(blocked.active, false)
 
-  const reGranted = grantUsage([
-    granted,
-    row({ ts: '2026-11-10T12:03:00.000Z' }),
-  ], { ...BASE, now: Date.parse('2026-11-10T12:04:00.000Z'), revokedAt: Date.parse('2026-11-10T12:02:00.000Z') })
-  assert.equal(reGranted.revoked, false)
-  assert.equal(reGranted.active, true)
+  // Re-approving the key clears the revocation (the hook calls clearRevocation),
+  // so the very next evaluation is live again.
+  const cleared = grantUsage([granted], { ...BASE, revoked: false })
+  assert.equal(cleared.revoked, false)
+  assert.equal(cleared.active, true)
 })
 
 test('grants are blocked by high risk, danger-full-access and alwaysAsk', () => {
@@ -137,5 +134,11 @@ test('revocations persist atomically and survive a re-read', () => {
   const state = readRevocations(dir)
   assert.equal(state.revocations.length, 2)
   assert.equal(revokedAtOf(state, 's1::bash::workspace-write'), 3000)
+  assert.equal(revokedAtOf(state, 's1::bash::other'), null)
   assert.equal(fs.existsSync(path.join(dir, 'grants.json.tmp')), false, 'no temp file is left behind')
+
+  assert.equal(clearRevocation(dir, 's1::bash::workspace-write'), true)
+  assert.equal(clearRevocation(dir, 's1::bash::workspace-write'), false, 'second clear is a no-op')
+  assert.equal(revokedAtOf(readRevocations(dir), 's1::bash::workspace-write'), null)
+  assert.equal(readRevocations(dir).revocations.length, 1)
 })
