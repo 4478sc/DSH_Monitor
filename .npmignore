@@ -1,0 +1,7 @@
+# Never ship local build/verification leftovers (see also .gitignore).
+__pycache__/
+*.pyc
+.tmp/
+.npm-cache/
+*.tgz
+node_modules/

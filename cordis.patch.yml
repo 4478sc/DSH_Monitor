@@ -1,4 +1,6 @@
-# @deepwhale-cn/dsh-approval-ledger 的组合层
+# Bundle patch for dsh-approval-toast: one host row for the merged plugin.
+# The row name resolves from the profile's node_modules, where
+# `dsh plugin --profile <profile> add <path>` (or a manual pnpm install) put it.
 - insert:
-    - id: approval-ledger
-      name: '@deepwhale-cn/dsh-approval-ledger'
+    - id: dsh-approval-toast
+      name: dsh-approval-toast

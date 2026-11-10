@@ -11,7 +11,7 @@ import {
   summarize,
   classifyRisk,
   resolveLedgerDir,
-} from '../lib/index.js';
+} from '../lib/ledger/index.js';
 
 function makeDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-approval-ledger-'));
