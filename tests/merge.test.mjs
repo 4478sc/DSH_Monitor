@@ -34,8 +34,9 @@ function mount(config = {}) {
       return typeof dispose === 'function' ? dispose : () => {}
     },
   }
-  apply(ctx, { ledgerDir: makeLedgerDir(), toast: { spawn: false }, ...config })
-  return { handlers, tools, routes, provided }
+  const ledgerDir = config.ledgerDir ?? makeLedgerDir()
+  apply(ctx, { ledgerDir, toast: { spawn: false }, ...config })
+  return { handlers, tools, routes, provided, ledgerDir }
 }
 
 /** Run the cordis waterfall the way the host does: each listener may call next(). */
@@ -67,6 +68,9 @@ test('one mount registers both halves', () => {
   assert.ok(mounted.provided.attentionToast, 'attentionToast service is provided')
   assert.equal(typeof mounted.provided.attentionToast.getApprovals, 'function')
   assert.ok(mounted.routes.some((r) => r.path === '/approval-ledger'), 'audit dashboard route is mounted')
+  // The ledger file is touched on load so the toast settings panel can report
+  // "connected" before the first approval (ported from ledger 0.2.9).
+  assert.ok(fs.existsSync(path.join(mounted.ledgerDir, 'ledger.jsonl')), 'ledger file exists right after mount')
 })
 
 test('gate mode: the toast observer still sees the request the ledger rejects', async () => {
