@@ -112,7 +112,7 @@ icon.svg          插件图标
 git clone https://github.com/4478sc/DSH_Monitor
 cd DSH_Monitor
 npm install
-npm test              # node --test tests/
+npm test              # node --test（自动发现 tests/ 下的用例）
 ```
 
 常见改动点：

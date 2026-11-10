@@ -25,7 +25,7 @@
     "icon.svg"
   ],
   "scripts": {
-    "test": "node --test tests/"
+    "test": "node --test"
   },
   "keywords": [
     "dsh",
