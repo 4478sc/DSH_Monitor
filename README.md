@@ -7,7 +7,7 @@
 
 > Records every operation that needed approval (tool, reason, risk, decision, outcome), can reject high-risk ones, and — separately — pops bottom-right desktop toasts when a task finishes, fails, asks a question, or waits for approval. Clicking a toast restores the DSH window and jumps straight to the session (and to the pending card, when there is one). One install, one settings surface, one ledger.
 
-**Current version `0.7.19`** | Windows (WPF) + Linux (GTK3) | 88 cases / 10 files
+**Current version `0.7.20`** | Windows (WPF) + Linux (GTK3) | 104 cases / 11 files
 
 ![Windows toast](docs/images/toast-win.png)
 
@@ -67,6 +67,7 @@ DSH 的审批是一个 waterfall 事件（`approval/request`），台账半边�
 | 三档任务模式 | `mainline`：标记会话立即弹、其余汇总一次；`balanced`：逐个弹；`silent`：完成/失败不弹，提问与审批仍弹 |
 | 当前会话三档 | `hidden` / `unfocused` / `always`（旧配置 `notifyCurrent=true` 自动迁移到 `always`） |
 | 等待子智能体 | 父会话完成但仍有 running 子会话时挂起，整波空闲再弹 |
+| 子代理提醒 | 默认开；关闭后子代理（`origin === 'subagent'`）不弹完成/失败/提问/审批，也不进支线汇总 |
 | 会话静音 | 会话行「…」菜单 🔕，该会话所有事件不弹 |
 | 审批浮窗 | 请求时弹「等待审批 + 会话标题 + 工具 — 理由 — 预判风险」；批准/拒绝后不再弹结果卡 |
 | 点击跳转 | 点浮窗切到对应会话；多会话汇总时弹会话选择器 |
@@ -91,8 +92,26 @@ Linux 侧的置前只在 **X11 / XWayland** 窗口上有效，两道前提缺一
 
 两个前提没满足时，**点击仍然会打开正确会话**，只是窗口不会被拉到前台（`raise_owner()` 返回 false，不报错）。确实需要 Linux 置前时，用 `--ozone-platform=x11` 启动 DSH 走 XWayland，再按上面的方式点浮窗即可。
 
+### 子代理提醒（0.7.20）
+
+设置 → **Attention Toast** → **任务优先级** 里新增**子代理提醒**，默认打开。它只存客户端配置（localStorage 键 `dsh-attention-toast:config` 的 `notifySubagents`），不进台账、不改宿主：
+
+| 状态 | 行为 |
+|---|---|
+| 开（默认） | 子代理与普通会话一样按任务模式提醒：完成/失败照旧、提问与审批照旧、支线照旧进汇总 |
+| 关 | 子代理（会话行 `origin === 'subagent'`）不弹**任何**浮窗：完成、失败、提问、审批都不弹，也不进支线汇总池 |
+
+几条容易误解的边界：
+
+- **只按 `origin === 'subagent'` 判断。** fork 出来的会话保留自己的 origin，普通 fork、父会话都不受影响。
+- **父会话提醒不变。** 关闭后父会话的完成/失败/提问/审批照常弹；「等待子智能体」是独立开关，父会话仍会等子会话跑完再提醒。
+- **纯子代理的波次没有汇总卡。** 都是子代理在跑时，关闭后既没有逐个提醒，也没有「支线任务全部结束」；混合波次只列出根会话。
+- **运行中切换立即生效。** 关闭会清掉已经进池或已挂起的子代理条目，之后不会再冒出来；重新打开不会重放关闭期间吞掉的提醒（待处理项按 key 记账，不补发）。
+- **审批路径的局限。** 服务端策略（例如 `policy: never`）本来就可能不派发审批请求；这个开关只保证客户端收到请求时（`toastPendingApproval`）不给子代理弹卡，它不改任何审批决策。
+
 ## 近期变化
 
+- **子代理提醒（0.7.20）**：设置 → Attention Toast → 任务优先级新增开关，关闭后子代理不弹任何浮窗、不贡献支线汇总，父会话与「等待子智能体」不受影响；运行中切换不会留下残影，也不会补发旧提醒。
 - **点击即到（0.7）**：点浮窗时由原生宿主把 DSH 窗口**还原 + 置前**（Windows：`AttachThreadInput` + `ShowWindow(SW_RESTORE)`；Linux：`xdotool windowactivate`），随后浏览器半边打开会话并定位到 `[data-approval-key]` 那张待审批卡片；提醒已被处理时弹“提醒已过期”。最小化状态点一次即可，不需要先唤醒再点第二下。
 - **会话授权只有一个开关（0.6）**：同时覆盖 `workspace-write` 与 `danger-full-access`（要么都记、要么都不记），danger 档仍受 **5 次上限**和“删除文件永不自动放行”约束。
 - **可诊断（0.7）**：`host.log` 里每次点击都有 `raise ok=… debug=…`，Linux 另有独立的 `raise.log`；宿主支持 `debug-ancestors` / `debug-raise` / `debug-desktop` 探针命令。
@@ -104,9 +123,9 @@ Linux 侧的置前只在 **X11 / XWayland** 窗口上有效，两道前提缺一
 
 ```powershell
 npm install          # zod + 测试用的 dsh-tools
-npm pack             # 产出 dsh-approval-toast-0.7.19.tgz
+npm pack             # 产出 dsh-approval-toast-0.7.20.tgz
 
-dsh plugin --profile desktop add .\dsh-approval-toast-0.7.19.tgz
+dsh plugin --profile desktop add .\dsh-approval-toast-0.7.20.tgz
 ```
 
 装完**重启 DSH**：宿主半边（`lib/index.js`、`lib/attention/`）不会热重载，纯客户端（`lib/client.js`）改完 Ctrl+R 即可。
@@ -195,7 +214,7 @@ lib/attention/toast_host.ps1    Windows WPF 宿主（UTF-8 **带 BOM**）
 lib/attention/toast_host.py     Linux GTK3 宿主
 lib/client.js               浏览器半边：设置页、通知引擎、审批/提问预判、点击跳转
 lib/typert.host.js          Typert 清单（service: attentionToast）
-tests/                      88 个用例，10 个文件
+tests/                      104 个用例，11 个文件
 ```
 
 ## 测试
@@ -216,6 +235,7 @@ npm test        # node --test
 | `tests/toast-registry.test.mjs` | 浮窗目标归一化、TTL 与上限淘汰 |
 | `tests/host-events.test.mjs` | 宿主事件解析、点击去重与 ack |
 | `tests/client-logic.test.mjs` | 设置迁移、三档决策、汇总、点击跳转、设置页结构回归 |
+| `tests/subagent-alerts.test.mjs` | **子代理提醒**：默认值与持久化、关闭后子代理完成/失败/提问/审批不弹、纯子代理汇总不弹、混合汇总保留根会话、普通 fork 不受影响、父会话与等待行为不变、开关动态切换（清池 / 不重放） |
 
 CI 在 **Ubuntu + Windows** 上跑同一套（Windows 额外校验 PowerShell 宿主能解析、且 BOM 还在）。
 
@@ -228,7 +248,7 @@ CI 在 **Ubuntu + Windows** 上跑同一套（Windows 额外校验 PowerShell �
 3. **浮窗半边搬到 `lib/attention/`**，只加三个接缝：`apply(ctx, options)` 接受注入的 `classify` 与 `spawn: false`（测试/无头）；存储目录迁到 `storages/dsh-approval-toast` 并自动继承旧配置；`predictRisk` 退化为无注入时的兜底。
 4. **包身份统一**为 `dsh-approval-toast`：Typert 清单的 `package` 与 9 个 invocation id、客户端贡献 id 同步改名（loader 会校验 `manifest.package === package.json name`）。
 5. **恢复被截断的 Windows 宿主**：上游仓库 `af69b6c` 里 `lib/toast_host.ps1` 只剩 3 字节 BOM（文件被清空但 BOM 保留），这里用实际发布过的 `.20` 构建内容补回（14456 字节），CI 增加 BOM 断言防止再犯。
-6. **测试合并**：合并时原有 9 + 38 个用例保留、新增 6 个合并契约用例；此后随会话授权与点击链路增至 **88 个用例 / 10 个文件**，仍是单条命令跑完。
+6. **测试合并**：合并时原有 9 + 38 个用例保留、新增 6 个合并契约用例；此后随会话授权与点击链路增至 88 个用例，再随子代理提醒增至 **104 个用例 / 11 个文件**，仍是单条命令跑完。
 7. **文档与法务**：README 双语合一；`LICENSE` 保留三方版权行；`THIRD-PARTY-NOTICES.md` 把台账从"可选、不打包"改成"已内置"。
 8. **补上 0.2.9 的行为**：台账文件在插件加载时就创建（而不是等第一次审批），这样浮窗设置页一装好就显示"已连接"；`tests/merge.test.mjs` 增加了对应断言。
 
@@ -242,6 +262,7 @@ CI 在 **Ubuntu + Windows** 上跑同一套（Windows 额外校验 PowerShell �
 - 删除类操作的识别是**关键字**判断（工具名 + 模型的理由），因为审批请求不带参数；误判的代价只是多问你一次。
 - **Linux 置前要求 X11/XWayland 窗口**：DSH 若以 Wayland 原生方式运行（Electron `--ozone-platform=wayland`，Ubuntu 22.04+ 默认），xdotool/wmctrl 看不到窗口，置前会被跳过——点击仍能打开会话；想让置前生效就用 `--ozone-platform=x11` 启动 DSH。
 - 浮窗宿主是长驻进程：升级插件后要 **设置 → Attention Toast → 重启宿主**（或重启 DSH）才会加载新宿主；纯客户端改动 Ctrl+R 即可。
+- 「子代理提醒」是**纯客户端**开关（localStorage），不进台账、不改宿主；识别只用会话行的 `origin === 'subagent'`，服务端 `policy: never` 这类本来就不派发审批的路径它管不到，只保证收到请求时不给子代理弹卡。
 
 ---
 
@@ -262,6 +283,7 @@ They were already coupled through one file (`$DSH_HOME/approval-ledger/ledger.js
 
 ### What changed recently
 
+- **0.7.20 — subagent alerts can be turned off.** A switch in Settings → Attention Toast → Task priority (on by default) stops subagent sessions from popping any toast and keeps them out of the side-line summary, while parent sessions, plain forks and "Wait for subagents" behave exactly as before.
 - **0.7 — a click lands.** The native host restores and raises the DSH window, the browser half opens the session from the toast registry (never by title), and approval toasts focus the actual pending card (`[data-approval-key]`). A click from a minimized window is answered in one step; a reminder that is already resolved says so instead of opening an empty conversation.
 - **0.6 — one switch for session grants.** It covers `workspace-write` and `danger-full-access` together, with a hard 5-use cap on the danger tier and file deletions never auto-approved.
 - **0.7 — diagnosable.** `host.log` records `raise ok=… debug=…` for every click, Linux also writes `raise.log`, and the host answers `debug-ancestors` / `debug-raise` / `debug-desktop`.
@@ -271,7 +293,7 @@ Install from source (tarball, never `link:`):
 ```powershell
 npm install
 npm pack
-dsh plugin --profile desktop add .\dsh-approval-toast-0.7.19.tgz
+dsh plugin --profile desktop add .\dsh-approval-toast-0.7.20.tgz
 ```
 
 ### Clicking a toast raises DSH and lands on the interaction
@@ -293,7 +315,13 @@ The single user-facing switch lives in **Settings → Attention Toast → Sessio
 
 Grants live in the ledger itself (one `delegated + allowed-once` row is "the user said yes", one `source: session-grant` row is a use), so `approval_ledger_stats`, the dashboard and the audit export show exactly how often the plugin answered for you. `approval_ledger_grants` lists and revokes them; a revoke is not permanent — approving the same key again clears it and re-arms the grant (comparing timestamps would be ambiguous, since a revoke and an approval can share a millisecond). Granularity is per tool + mode because the approval waterfall carries no tool arguments — see the Chinese section above for why.
 
-Tests: `npm test` (88 cases, 10 files, Ubuntu + Windows CI).
+### Subagent alerts (0.7.20)
+
+**Settings → Attention Toast → Task priority** now has a **Subagent alerts** switch, on by default. It is client-side only: it lives in the `dsh-attention-toast:config` localStorage entry as `notifySubagents`, never in the ledger or the host config.
+
+When it is off, a session whose row says `origin: 'subagent'` produces no toast at all — completed, failed, question and approval — and never joins the side-line pool, so a subagent-only wave shows no summary card and a mixed wave lists only its root sessions. `origin` is the only test, so ordinary forks and parent sessions keep their alerts; the separate "Wait for subagents" switch still holds a parent back while its children run. Switching at runtime takes effect immediately: entries already pooled or deferred for a subagent are dropped instead of surfacing later, and turning it back on never replays what arrived while it was off (pending interactions are remembered by key). The approval half is best-effort by nature — a server-side policy such as `policy: never` may never dispatch a request, and this switch only keeps the client's `toastPendingApproval` path from popping a card for a subagent.
+
+Tests: `npm test` (104 cases, 11 files, Ubuntu + Windows CI).
 
 ## License
 
